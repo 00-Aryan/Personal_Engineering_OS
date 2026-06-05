@@ -1,10 +1,22 @@
 # ProjectOS
 
+[![CI](https://github.com/00-Aryan/Personal_Engineering_OS/actions/workflows/ci.yml/badge.svg)](https://github.com/00-Aryan/Personal_Engineering_OS/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.12%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 ## What ProjectOS Is
 
 ProjectOS is a local Python orchestration prototype for coordinating multiple engineering agents around a repository. It watches for code changes, routes events through a Clone supervisor, sends work to specialized agents, records decisions in `decisions.log`, and writes artifacts such as review reports, generated tests, backlog entries, ADRs, blocked-task records, and escalation records.
 
 The system is honest infrastructure, not a production autonomous engineer. It has mocked-provider test coverage and deterministic orchestration paths, but real model quality, safety review, and operational resilience still depend on configured providers, local environment setup, and human review of escalations.
+
+## Philosophy
+
+ProjectOS was built because a single developer cannot always hold planning, implementation, review, architecture, testing, and documentation contexts at the same time. The goal is to keep routine engineering work moving while Aryan focuses on academic work, project direction, and higher-leverage decisions.
+
+The system solves for continuity. It gives each engineering responsibility a named agent, routes every event through a Clone supervisor, records why decisions were made, and keeps blocked work from stopping unrelated progress. Its job is not to replace engineering judgment; its job is to preserve context, enforce standards, and make handoffs explicit.
+
+ProjectOS will not become an unbounded autonomous product in version 1. It is scoped to Aryan's personal projects, single-machine deployment, Python-first workflows, configured model providers, and human escalation for important architecture, dependency, and breaking-change decisions. Multi-user support, enterprise features, self-modifying agents, and a web dashboard remain out of scope for the current version.
 
 ## Architecture
 
@@ -101,6 +113,16 @@ UV_CACHE_DIR=/tmp/uv-cache PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest
 | `projectos review FILE_PATH` | Submits a manual `CODE_CHANGED` event for one file. |
 | `projectos run` | Starts the trigger system and background ProjectOS event loop until interrupted. |
 
+## Use as MCP Server
+
+ProjectOS can run as a stdio MCP server for MCP-compatible clients such as Codex and Claude Code.
+
+```bash
+codex mcp add projectos -- uv run --no-sync python -m mcp_server.server
+```
+
+The server exposes tools for planning, code review, status, decision queries, and escalation approval over JSON-RPC 2.0.
+
 ## Swap A Model With `/model`
 
 The implemented CLI command is `projectos model AGENT_NAME MODEL_NAME`. If using a slash-command wrapper, `/model planning deepseek-v3` should map to:
@@ -150,6 +172,17 @@ No agent should hardcode model names. Change models through `config/models.yaml`
 - The manual `review` CLI command submits to a lightweight target unless wired with the full ProjectOS runtime.
 - `decisions.log` is append-only at the content level through temp-file replacement, not an OS-level append-only file.
 - Provider calls require valid local environment variables, except mocked tests and local Ollama-style use cases.
+
+## Roadmap
+
+Future `TASK_21+` work should focus on the next open-source readiness and runtime-hardening layer:
+
+- Package installation and CLI verification on a fresh machine.
+- Contributor-facing examples for adding agents and providers.
+- Live-provider smoke checks that remain optional and environment-gated.
+- More durable daemon lifecycle controls for start, stop, and restart flows.
+- Better multi-project observability across project registries and queues.
+- Expanded safety review around generated code writes and auto-commits.
 
 ## Contributing
 

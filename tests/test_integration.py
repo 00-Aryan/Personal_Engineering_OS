@@ -44,8 +44,8 @@ GENERATED_TESTS = (
 )
 PASSING_PYTEST_OUTPUT = "1 passed in 0.01s"
 FEATURE_DESCRIPTION = "Create a generated helper."
-FEATURE_FILE = "generated/feature.py"
-BLOCKED_FILE = "generated/blocked.py"
+FEATURE_FILE = "agents/generated_feature.py"
+BLOCKED_FILE = "agents/generated_blocked.py"
 INDEPENDENT_FILE = "independent.py"
 
 

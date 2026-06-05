@@ -11,6 +11,7 @@ from typing import Any, Mapping, Optional
 from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
+from core.safety import SafetyPolicy, SafetyResult
 
 
 AGENT_NAME = "code_writing"
@@ -59,8 +60,11 @@ DECISION_LOG_SEPARATOR = "] ["
 DECISION_LOG_SUFFIX = "]\n"
 DECISION_SUCCESS = "SUCCESS"
 DECISION_FAILURE = "FAILURE"
+DECISION_DIFF_PREVIEW = "DIFF_PREVIEW"
 DECISION_REASON_MISSING_PAYLOAD = "code writing event missing required payload"
 DECISION_REASON_WRITTEN_TEMPLATE = "Wrote {line_count} lines to {file_path} for task {task_id}"
+DECISION_REASON_SAFETY_BLOCKED_TEMPLATE = "safety policy blocked write to {file_path}: {reason}"
+DECISION_REASON_SAFETY_WARNING_TEMPLATE = "safety policy warnings for {file_path}: {warnings}"
 
 OUTPUT_KEY_ERROR = "error"
 OUTPUT_KEY_FILE_PATH = "file_path"
@@ -114,10 +118,12 @@ class CodeWritingAgent(BaseAgent):
         model_provider: ModelProvider,
         logger: logging.Logger,
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
+        safety_policy: Optional[SafetyPolicy] = None,
     ) -> None:
         """Initialize CodeWritingAgent with model access and project paths."""
         super().__init__(AGENT_NAME, ROLE_DESCRIPTION, model_provider, logger)
         self.project_root = Path(project_root)
+        self.safety_policy = safety_policy
 
     def handle(self, event: AgentEvent) -> AgentResult:
         """Write code for an incoming task event and emit CODE_WRITTEN."""
@@ -135,6 +141,12 @@ class CodeWritingAgent(BaseAgent):
             MODEL_MAX_TOKENS,
         )
         code = self._normalize_model_code(model_output)
+        safety_result = self._validate_safe_write(event, file_path, code)
+        if safety_result is not None and safety_result.diff_preview:
+            self._log_decision(event, DECISION_DIFF_PREVIEW, safety_result.diff_preview)
+        if safety_result is not None and not safety_result.allowed:
+            return self._safety_failure_result(event, file_path, safety_result)
+        escalation_reason = self._safety_warning_reason(file_path, safety_result)
         _write_atomically(file_path, code)
 
         line_count = self._line_count(code)
@@ -151,6 +163,49 @@ class CodeWritingAgent(BaseAgent):
                 OUTPUT_KEY_LINE_COUNT: line_count,
             },
             next_events=[self._code_written_event(event, file_path, line_count)],
+            escalate=bool(escalation_reason),
+            escalation_reason=escalation_reason,
+        )
+
+    def _validate_safe_write(
+        self,
+        event: AgentEvent,
+        file_path: Path,
+        code: str,
+    ) -> Optional[SafetyResult]:
+        """Return safety validation result when a policy is configured."""
+        if self.safety_policy is None:
+            return None
+        result = self.safety_policy.validate_write(file_path, code)
+        for warning in result.warnings:
+            self.logger.warning(warning)
+        return result
+
+    def _safety_failure_result(
+        self,
+        event: AgentEvent,
+        file_path: Path,
+        safety_result: SafetyResult,
+    ) -> AgentResult:
+        """Log and return a failure result for blocked writes."""
+        reason = DECISION_REASON_SAFETY_BLOCKED_TEMPLATE.format(
+            file_path=str(file_path),
+            reason=safety_result.reason,
+        )
+        self.logger.error(reason)
+        return self._failure_result(event, reason)
+
+    def _safety_warning_reason(
+        self,
+        file_path: Path,
+        safety_result: Optional[SafetyResult],
+    ) -> Optional[str]:
+        """Return escalation reason for non-blocking safety warnings."""
+        if safety_result is None or not safety_result.warnings:
+            return None
+        return DECISION_REASON_SAFETY_WARNING_TEMPLATE.format(
+            file_path=str(file_path),
+            warnings=", ".join(safety_result.warnings),
         )
 
     def _validate_payload(self, payload: Mapping[str, Any]) -> Optional[str]:

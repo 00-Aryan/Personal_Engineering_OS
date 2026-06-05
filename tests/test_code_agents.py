@@ -13,6 +13,7 @@ from unittest.mock import Mock
 from agents.code_review_agent import CodeReviewAgent, ReviewIssue
 from agents.code_writing_agent import CodeWritingAgent
 from core.events import AgentEvent, EventType
+from core.safety import SafetyPolicy
 
 
 SOURCE_AGENT = "unit_test"
@@ -58,6 +59,26 @@ REVIEW_SUFFIX = "_review.md"
 BACKLOG_FILE_NAME = "backlog.md"
 BACKLOG_DONE_STATUS = "- Status: DONE"
 BACKLOG_BLOCKED_STATUS = "- Status: BLOCKED"
+COMMIT_HASH = "abc1234"
+
+
+class FakeGitManager:
+    """Test double for CodeReviewAgent git integration."""
+
+    def __init__(self) -> None:
+        """Initialize captured git calls."""
+        self.staged_files: list[Path] = []
+        self.commit_messages: list[str] = []
+
+    def stage_file(self, file_path: Path) -> bool:
+        """Capture staged file paths."""
+        self.staged_files.append(file_path)
+        return True
+
+    def commit(self, message: str) -> str:
+        """Capture commit messages and return a fake hash."""
+        self.commit_messages.append(message)
+        return COMMIT_HASH
 
 
 class CodeAgentsTestCase(unittest.TestCase):
@@ -96,6 +117,21 @@ class CodeAgentsTestCase(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertTrue(written_path.exists())
         self.assertEqual(written_path.read_text(encoding=TEST_ENCODING), GENERATED_CODE)
+
+    def test_code_writing_safety_policy_blocks_write(self) -> None:
+        """Verify injected safety policy blocks disallowed write paths."""
+        self.model_provider.complete.return_value = GENERATED_CODE
+        safe_writer = CodeWritingAgent(
+            model_provider=self.model_provider,
+            logger=self.logger,
+            project_root=self.project_root,
+            safety_policy=SafetyPolicy([self.project_root / "tests"], []),
+        )
+
+        result = safe_writer.handle(self._writing_event())
+
+        self.assertFalse(result.success)
+        self.assertFalse((self.project_root / RELATIVE_FILE_PATH).exists())
 
     def test_code_writing_emits_code_written_event(self) -> None:
         """Verify CodeWritingAgent emits a CODE_WRITTEN event."""
@@ -176,6 +212,44 @@ class CodeAgentsTestCase(unittest.TestCase):
         self.assertIn(TEST_MODEL_NAME, report_content)
         self.assertIn(REPORT_SUMMARY, report_content)
         self.assertEqual(self._review_report_count(), 1)
+
+    def test_code_review_auto_commits_when_no_critical_issues(self) -> None:
+        """Verify CodeReviewAgent commits reviewed files without critical issues."""
+        file_path = self._write_review_target()
+        git_manager = FakeGitManager()
+        reviewer = CodeReviewAgent(
+            model_provider=self.model_provider,
+            logger=self.logger,
+            project_root=self.project_root,
+            git_manager=git_manager,
+        )
+        self.model_provider.complete.return_value = EMPTY_JSON_ARRAY
+
+        result = reviewer.handle(self._review_event(file_path))
+
+        self.assertTrue(result.success)
+        self.assertEqual(git_manager.staged_files, [file_path])
+        self.assertEqual(len(git_manager.commit_messages), 1)
+        self.assertIn("projectos: auto-review passed", git_manager.commit_messages[0])
+
+    def test_code_review_skips_commit_when_critical_issues(self) -> None:
+        """Verify CodeReviewAgent does not commit files with critical issues."""
+        file_path = self._write_review_target()
+        git_manager = FakeGitManager()
+        reviewer = CodeReviewAgent(
+            model_provider=self.model_provider,
+            logger=self.logger,
+            project_root=self.project_root,
+            git_manager=git_manager,
+        )
+        self.model_provider.complete.return_value = self._critical_review_json()
+
+        result = reviewer.handle(self._review_event(file_path))
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.escalate)
+        self.assertEqual(git_manager.staged_files, [])
+        self.assertEqual(git_manager.commit_messages, [])
 
     def _writing_event(self) -> AgentEvent:
         """Create a valid code-writing event."""

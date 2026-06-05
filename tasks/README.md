@@ -17,11 +17,16 @@ Never start a task without reading all existing code first.
 - TASK_08: DONE (task queue/CLI - 49 tests green; uv sync blocked by network)
 - TASK_09: DONE (integration wiring - 52 tests green; uv sync blocked by network)
 - TASK_10: DONE (end-to-end verification + README - 52 tests green)
-- TASK_11: PENDING
-- TASK_12: PENDING
-- TASK_13: PENDING
-- TASK_14: PENDING
-- TASK_15: PENDING
+- TASK_11: DONE (durable queue persistence - 59 tests green)
+- TASK_12: DONE (provider health checks + retry - 67 tests green)
+- TASK_13: DONE (JSONL decision logging - 78 tests green)
+- TASK_14: DONE (code write safety policy - 87 tests green)
+- TASK_15: DONE (Ollama fallback router + benchmark - 96 tests green)
+- TASK_16: DONE (git integration - 105 tests green)
+- TASK_17: DONE (rich terminal dashboard - 108 tests green; uv add blocked by network)
+- TASK_18: DONE (stdio MCP server - 113 tests green)
+- TASK_19: DONE (multi-project support - 118 tests green)
+- TASK_20: DONE (open source preparation - 125 tests green)
 
 ## Audit Protocol
 After every task, TASK_XX_RESULT.md must contain:

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import queue
+from fnmatch import fnmatch
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, List, Optional
 
 from core.events import AgentEvent, EventType
 
@@ -54,6 +55,8 @@ PYTHON_EXTENSION = ".py"
 PYTHON_BYTECODE_EXTENSION = ".pyc"
 GIT_DIR_NAME = ".git"
 PYCACHE_DIR_NAME = "__pycache__"
+DEFAULT_WATCH_PATTERNS = ["*.py"]
+DEFAULT_IGNORE_PATTERNS = [PYCACHE_DIR_NAME, GIT_DIR_NAME]
 TEST_FILE_PREFIX = "test_"
 TEST_FILE_SUFFIX = "_test.py"
 
@@ -70,10 +73,17 @@ def _utc_timestamp() -> str:
 class FileChangeHandler(FileSystemEventHandler):
     """Translate filesystem modifications into ProjectOS queue events."""
 
-    def __init__(self, event_dispatcher: queue.Queue[AgentEvent]) -> None:
+    def __init__(
+        self,
+        event_dispatcher: queue.Queue[AgentEvent],
+        watch_patterns: Optional[Iterable[str]] = None,
+        ignore_patterns: Optional[Iterable[str]] = None,
+    ) -> None:
         """Initialize the handler with a queue dispatcher."""
         super().__init__()
         self.event_dispatcher = event_dispatcher
+        self.watch_patterns = list(watch_patterns or DEFAULT_WATCH_PATTERNS)
+        self.ignore_patterns = list(ignore_patterns or DEFAULT_IGNORE_PATTERNS)
 
     def on_modified(self, event: Any) -> None:
         """Emit CODE_CHANGED for modified Python files without blocking."""
@@ -87,7 +97,7 @@ class FileChangeHandler(FileSystemEventHandler):
         changed_path = Path(src_path)
         if self._should_ignore(changed_path):
             return
-        if changed_path.suffix != PYTHON_EXTENSION:
+        if not self._matches_watch_patterns(changed_path):
             return
 
         agent_event = AgentEvent(
@@ -106,11 +116,18 @@ class FileChangeHandler(FileSystemEventHandler):
     def _should_ignore(self, changed_path: Path) -> bool:
         """Return whether a filesystem path should be ignored."""
         path_parts = set(changed_path.parts)
-        if PYCACHE_DIR_NAME in path_parts or GIT_DIR_NAME in path_parts:
+        if any(pattern in path_parts for pattern in self.ignore_patterns):
             return True
         if changed_path.suffix == PYTHON_BYTECODE_EXTENSION:
             return True
         return self._is_test_file(changed_path)
+
+    def _matches_watch_patterns(self, changed_path: Path) -> bool:
+        """Return whether a changed path matches configured watch patterns."""
+        return any(
+            fnmatch(changed_path.name, pattern) or fnmatch(str(changed_path), pattern)
+            for pattern in self.watch_patterns
+        )
 
     def _is_test_file(self, changed_path: Path) -> bool:
         """Return whether a changed path is a Python test file."""
@@ -127,11 +144,17 @@ class TriggerSystem:
         self,
         watch_dir: Path | str,
         event_dispatcher: queue.Queue[AgentEvent],
+        watch_patterns: Optional[Iterable[str]] = None,
+        ignore_patterns: Optional[Iterable[str]] = None,
     ) -> None:
         """Initialize the trigger system with a watch directory and queue."""
         self.watch_dir = Path(watch_dir)
         self.event_dispatcher = event_dispatcher
-        self.handler = FileChangeHandler(event_dispatcher)
+        self.handler = FileChangeHandler(
+            event_dispatcher,
+            watch_patterns=watch_patterns,
+            ignore_patterns=ignore_patterns,
+        )
         self.observer = Observer()
         self._running = False
 

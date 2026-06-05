@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 import tempfile
@@ -32,8 +33,10 @@ DEFER_PARALLEL_ENTRY = "DEFER_PARALLEL"
 MARKDOWN_TABLE_ROW_PREFIX = "| "
 SMOKE_TEST_FAILED_MESSAGE = "SMOKE TEST FAILED: Clone write logic broken"
 SMOKE_TEST_PASSED_MESSAGE = "SMOKE TEST PASSED"
+CI_SMOKE_TEST_PASSED_MESSAGE = "CI SMOKE: PASSED"
 ENCODING = "utf-8"
 LOGGER_NAME = "projectos.smoke_test"
+CI_FLAG = "--ci"
 
 
 class SmokeModelProvider:
@@ -59,13 +62,28 @@ class SmokeModelProvider:
 
 def main() -> int:
     """Run Clone Agent smoke checks and return a process exit code."""
+    args = _parse_args()
     try:
         run_smoke_test()
     except AssertionError as error:
         print(f"{SMOKE_TEST_FAILED_MESSAGE}: {error}", file=sys.stderr)
         return 1
-    print(SMOKE_TEST_PASSED_MESSAGE)
+    if args.ci:
+        print(CI_SMOKE_TEST_PASSED_MESSAGE)
+    else:
+        print(SMOKE_TEST_PASSED_MESSAGE)
     return 0
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse smoke-test command line arguments."""
+    parser = argparse.ArgumentParser(description="Run ProjectOS smoke checks.")
+    parser.add_argument(
+        CI_FLAG,
+        action="store_true",
+        help="Print a CI-specific success marker.",
+    )
+    return parser.parse_args()
 
 
 def run_smoke_test() -> None:

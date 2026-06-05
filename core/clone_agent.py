@@ -8,9 +8,11 @@ import tempfile
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Iterable, List, Mapping, Optional, Sequence
 
 from core.base_agent import BaseAgent
+from core.decision_log import DecisionLogger
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
 
@@ -222,6 +224,7 @@ class CloneAgent(BaseAgent):
         self.blocked_events: List[AgentEvent] = []
         self.agent_registry = agent_registry
         self.task_queue = task_queue
+        self.decision_logger = DecisionLogger(self.project_root)
         self._ensure_project_files()
 
     def classify_decision(self, event: AgentEvent) -> DecisionCategory:
@@ -246,7 +249,12 @@ class CloneAgent(BaseAgent):
         self._submit_dispatched_events(next_events)
         return next_events
 
-    def escalate(self, event: AgentEvent, reason: str) -> None:
+    def escalate(
+        self,
+        event: AgentEvent,
+        reason: str,
+        duration_ms: Optional[int] = None,
+    ) -> None:
         """Append an event to the escalation queue and decision log."""
         timestamp = _utc_timestamp()
         safe_reason = _sanitize_table_value(reason)
@@ -254,7 +262,7 @@ class CloneAgent(BaseAgent):
             [timestamp, event.event_id, safe_reason, LOG_STATUS_PENDING]
         )
         _append_atomically(self._escalation_queue_path, row)
-        self._log_decision(event, DecisionCategory.ESCALATE, reason)
+        self._log_decision(event, DecisionCategory.ESCALATE, reason, duration_ms)
         self.logger.warning(row.strip())
 
     def handle_blocked(self, event: AgentEvent) -> List[AgentEvent]:
@@ -291,14 +299,18 @@ class CloneAgent(BaseAgent):
 
     def handle(self, event: AgentEvent) -> AgentResult:
         """Classify, log, and dispatch a Clone Agent event."""
+        started_at = perf_counter()
         if event.event_type is EventType.PERMISSION_GRANTED:
-            return self._handle_permission_granted(event)
+            return self._handle_permission_granted(
+                event,
+                self._duration_ms(started_at),
+            )
 
         decision_category = self.classify_decision(event)
         reasoning = self._decision_reason(event, decision_category)
 
         if decision_category is DecisionCategory.ESCALATE:
-            self.escalate(event, reasoning)
+            self.escalate(event, reasoning, self._duration_ms(started_at))
             return AgentResult(
                 success=True,
                 output=self._result_output(decision_category, reasoning),
@@ -310,7 +322,12 @@ class CloneAgent(BaseAgent):
             self._submit_blocked_event(event)
             independent_events = self.handle_blocked(event)
             next_events = self._dispatch_independent_events(independent_events)
-            self._log_decision(event, decision_category, reasoning)
+            self._log_decision(
+                event,
+                decision_category,
+                reasoning,
+                self._duration_ms(started_at),
+            )
             return AgentResult(
                 success=True,
                 output=self._result_output(decision_category, reasoning),
@@ -318,7 +335,12 @@ class CloneAgent(BaseAgent):
             )
 
         next_events = self.dispatch(event)
-        self._log_decision(event, decision_category, reasoning)
+        self._log_decision(
+            event,
+            decision_category,
+            reasoning,
+            self._duration_ms(started_at),
+        )
         return AgentResult(
             success=True,
             output=self._result_output(decision_category, reasoning),
@@ -523,7 +545,11 @@ class CloneAgent(BaseAgent):
         except Exception as error:
             self.logger.exception("Clone blocked submit failed: %s", error)
 
-    def _handle_permission_granted(self, event: AgentEvent) -> AgentResult:
+    def _handle_permission_granted(
+        self,
+        event: AgentEvent,
+        duration_ms: Optional[int] = None,
+    ) -> AgentResult:
         """Resume a task queue item for a permission grant event."""
         resumed = False
         if self.task_queue is not None:
@@ -532,6 +558,7 @@ class CloneAgent(BaseAgent):
             event,
             DecisionCategory.AUTONOMOUS,
             DECISION_REASON_PERMISSION_GRANTED,
+            duration_ms,
         )
         return AgentResult(
             success=True,
@@ -560,6 +587,7 @@ class CloneAgent(BaseAgent):
         event: AgentEvent,
         decision_category: DecisionCategory,
         reasoning: str,
+        duration_ms: Optional[int] = None,
     ) -> None:
         """Append one Clone decision to decisions.log."""
         timestamp = _utc_timestamp()
@@ -570,7 +598,21 @@ class CloneAgent(BaseAgent):
             f"{reasoning}{DECISION_LOG_SUFFIX}"
         )
         _append_atomically(self._decisions_log_path, decision_line)
+        self.decision_logger.log(
+            event_id=event.event_id,
+            correlation_id=event.correlation_id,
+            agent_name=self.name,
+            decision_category=decision_category.value,
+            reasoning=reasoning,
+            outcome=decision_category.value,
+            escalated=decision_category is DecisionCategory.ESCALATE,
+            duration_ms=duration_ms,
+        )
         self.log_decision(reasoning, decision_category.value)
+
+    def _duration_ms(self, started_at: float) -> int:
+        """Return elapsed milliseconds from a monotonic start time."""
+        return int((perf_counter() - started_at) * 1000)
 
 
 __all__ = ["CloneAgent", "DecisionCategory"]

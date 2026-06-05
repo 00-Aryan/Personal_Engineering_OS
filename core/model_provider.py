@@ -6,15 +6,18 @@ import json
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, Iterator, Mapping, Optional
-from urllib.parse import quote
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional
+from urllib.parse import quote, urlparse
 
 import requests
 import yaml
 
+from core.retry import with_retry
+
 
 CONFIG_KEY_AGENTS = "agents"
 CONFIG_KEY_API_KEY_ENV = "api_key_env"
+CONFIG_KEY_BASE_URL = "base_url"
 CONFIG_KEY_COMPLETION_URL = "completion_url"
 CONFIG_KEY_COMPLETION_URL_TEMPLATE = "completion_url_template"
 CONFIG_KEY_DEFAULT_MODEL = "default_model"
@@ -24,6 +27,17 @@ CONFIG_KEY_PROVIDERS = "providers"
 CONFIG_KEY_STREAM_URL = "stream_url"
 CONFIG_KEY_STREAM_URL_TEMPLATE = "stream_url_template"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "models.yaml"
+HEALTH_CHECK_TIMEOUT_SECONDS = 5
+PROVIDER_RETRY_ATTEMPTS = 3
+PROVIDER_RETRY_BACKOFF_SECONDS = 1.0
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+GEMINI_MODELS_URL_TEMPLATE = (
+    "https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+)
+OLLAMA_BASE_URL_ENV = "OLLAMA_BASE_URL"
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_GENERATE_PATH = "/api/generate"
+OLLAMA_TAGS_PATH = "/api/tags"
 
 
 class ModelProviderConfigError(RuntimeError):
@@ -59,6 +73,10 @@ class ModelProvider(ABC):
     @abstractmethod
     def stream(self, prompt: str, system_prompt: str) -> Iterator[str]:
         """Yield streamed model response fragments for the provided prompt."""
+
+    def health_check(self) -> bool:
+        """Return whether this provider is reachable without raising."""
+        return False
 
     def get_model_name(self) -> str:
         """Return the configured model name for this provider instance."""
@@ -165,6 +183,14 @@ class ModelProvider(ABC):
         response.raise_for_status()
         return response
 
+    def _with_retry(self, fn: Callable[[], Any]) -> Any:
+        """Execute a provider request with standard retry policy."""
+        return with_retry(
+            fn,
+            max_attempts=PROVIDER_RETRY_ATTEMPTS,
+            backoff_seconds=PROVIDER_RETRY_BACKOFF_SECONDS,
+        )
+
 
 class OpenRouterProvider(ModelProvider):
     """Model provider implementation for the OpenRouter chat API."""
@@ -178,6 +204,36 @@ class OpenRouterProvider(ModelProvider):
         max_tokens: int,
     ) -> str:
         """Return a complete response from OpenRouter."""
+        return str(
+            self._with_retry(
+                lambda: self._complete_once(prompt, system_prompt, max_tokens)
+            )
+        )
+
+    def stream(self, prompt: str, system_prompt: str) -> Iterator[str]:
+        """Yield streamed response fragments from OpenRouter."""
+        return iter(
+            self._with_retry(lambda: list(self._stream_once(prompt, system_prompt)))
+        )
+
+    def health_check(self) -> bool:
+        """Return whether the OpenRouter models endpoint is reachable."""
+        try:
+            response = requests.get(
+                OPENROUTER_MODELS_URL,
+                timeout=HEALTH_CHECK_TIMEOUT_SECONDS,
+            )
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def _complete_once(
+        self,
+        prompt: str,
+        system_prompt: str,
+        max_tokens: int,
+    ) -> str:
+        """Return one non-retried complete response from OpenRouter."""
         response = self._post_json(
             url=self._required_config_value(CONFIG_KEY_COMPLETION_URL),
             payload=self._chat_payload(prompt, system_prompt, max_tokens),
@@ -186,8 +242,8 @@ class OpenRouterProvider(ModelProvider):
         response_payload = response.json()
         return str(response_payload["choices"][0]["message"]["content"])
 
-    def stream(self, prompt: str, system_prompt: str) -> Iterator[str]:
-        """Yield streamed response fragments from OpenRouter."""
+    def _stream_once(self, prompt: str, system_prompt: str) -> Iterator[str]:
+        """Yield one non-retried stream from OpenRouter."""
         response = self._post_json(
             url=self._required_config_value(CONFIG_KEY_STREAM_URL),
             payload=self._chat_payload(prompt, system_prompt, None, stream=True),
@@ -251,14 +307,47 @@ class GeminiProvider(ModelProvider):
         max_tokens: int,
     ) -> str:
         """Return a complete response from Gemini."""
+        return str(
+            self._with_retry(
+                lambda: self._complete_once(prompt, system_prompt, max_tokens)
+            )
+        )
+
+    def stream(self, prompt: str, system_prompt: str) -> Iterator[str]:
+        """Yield streamed response fragments from Gemini."""
+        return iter(
+            self._with_retry(lambda: list(self._stream_once(prompt, system_prompt)))
+        )
+
+    def health_check(self) -> bool:
+        """Return whether the Gemini models endpoint is reachable."""
+        try:
+            api_key = self._api_key()
+            if not api_key:
+                return False
+            response = requests.get(
+                GEMINI_MODELS_URL_TEMPLATE.format(api_key=quote(api_key, safe="")),
+                timeout=HEALTH_CHECK_TIMEOUT_SECONDS,
+            )
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def _complete_once(
+        self,
+        prompt: str,
+        system_prompt: str,
+        max_tokens: int,
+    ) -> str:
+        """Return one non-retried complete response from Gemini."""
         response = self._post_json(
             url=self._format_template_url(CONFIG_KEY_COMPLETION_URL_TEMPLATE),
             payload=self._gemini_payload(prompt, system_prompt, max_tokens),
         )
         return self._extract_text(response.json())
 
-    def stream(self, prompt: str, system_prompt: str) -> Iterator[str]:
-        """Yield streamed response fragments from Gemini."""
+    def _stream_once(self, prompt: str, system_prompt: str) -> Iterator[str]:
+        """Yield one non-retried stream from Gemini."""
         response = self._post_json(
             url=self._format_template_url(CONFIG_KEY_STREAM_URL_TEMPLATE),
             payload=self._gemini_payload(prompt, system_prompt, None),
@@ -317,17 +406,47 @@ class OllamaProvider(ModelProvider):
         max_tokens: int,
     ) -> str:
         """Return a complete response from Ollama."""
+        return str(
+            self._with_retry(
+                lambda: self._complete_once(prompt, system_prompt, max_tokens)
+            )
+        )
+
+    def stream(self, prompt: str, system_prompt: str) -> Iterator[str]:
+        """Yield streamed response fragments from Ollama."""
+        return iter(
+            self._with_retry(lambda: list(self._stream_once(prompt, system_prompt)))
+        )
+
+    def health_check(self) -> bool:
+        """Return whether the local Ollama API is reachable."""
+        try:
+            response = requests.get(
+                self._ollama_url(OLLAMA_TAGS_PATH),
+                timeout=HEALTH_CHECK_TIMEOUT_SECONDS,
+            )
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def _complete_once(
+        self,
+        prompt: str,
+        system_prompt: str,
+        max_tokens: int,
+    ) -> str:
+        """Return one non-retried complete response from Ollama."""
         response = self._post_json(
-            url=self._required_config_value(CONFIG_KEY_COMPLETION_URL),
+            url=self._ollama_url(OLLAMA_GENERATE_PATH),
             payload=self._ollama_payload(prompt, system_prompt, max_tokens, stream=False),
         )
         response_payload = response.json()
         return str(response_payload.get("response", ""))
 
-    def stream(self, prompt: str, system_prompt: str) -> Iterator[str]:
-        """Yield streamed response fragments from Ollama."""
+    def _stream_once(self, prompt: str, system_prompt: str) -> Iterator[str]:
+        """Yield one non-retried stream from Ollama."""
         response = self._post_json(
-            url=self._required_config_value(CONFIG_KEY_STREAM_URL),
+            url=self._ollama_url(OLLAMA_GENERATE_PATH),
             payload=self._ollama_payload(prompt, system_prompt, None, stream=True),
             stream=True,
         )
@@ -357,3 +476,31 @@ class OllamaProvider(ModelProvider):
         if max_tokens is not None:
             payload["options"] = {"num_predict": max_tokens}
         return payload
+
+    def _ollama_url(self, path: str) -> str:
+        """Return an Ollama URL from env, config base URL, or legacy URL config."""
+        base_url = self._ollama_base_url()
+        return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+    def _ollama_base_url(self) -> str:
+        """Return the configured Ollama base URL with localhost as final default."""
+        env_base_url = os.environ.get(OLLAMA_BASE_URL_ENV)
+        if env_base_url:
+            return env_base_url
+
+        configured_base_url = self._optional_config_value(CONFIG_KEY_BASE_URL)
+        if configured_base_url:
+            return configured_base_url
+
+        configured_generate_url = self._optional_config_value(CONFIG_KEY_COMPLETION_URL)
+        if configured_generate_url:
+            return self._base_url_from_generate_url(configured_generate_url)
+
+        return DEFAULT_OLLAMA_BASE_URL
+
+    def _base_url_from_generate_url(self, generate_url: str) -> str:
+        """Derive a base URL from a legacy Ollama generate endpoint URL."""
+        parsed_url = urlparse(generate_url)
+        if not parsed_url.scheme or not parsed_url.netloc:
+            return DEFAULT_OLLAMA_BASE_URL
+        return f"{parsed_url.scheme}://{parsed_url.netloc}"

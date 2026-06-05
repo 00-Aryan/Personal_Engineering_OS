@@ -21,7 +21,12 @@ from agents.test_agent import TestAgent
 from core.agent_registry import AgentRegistry
 from core.clone_agent import CloneAgent
 from core.events import AgentEvent, AgentResult
+from core.git_manager import GitManager
 from core.model_provider import GeminiProvider, OllamaProvider, OpenRouterProvider
+from core.persistence import PersistenceManager
+from core.project_config import ProjectConfig, ProjectRegistry
+from core.provider_health import ProviderHealthMonitor
+from core.safety import DefaultSafetyPolicy
 from core.task_queue import TaskQueue
 from core.trigger_system import TriggerSystem
 
@@ -29,6 +34,7 @@ from core.trigger_system import TriggerSystem
 DEFAULT_CONFIG_PATH = Path("config/models.yaml")
 CONFIG_DIR_NAME = "config"
 DECISIONS_LOG_NAME = "decisions.log"
+STATE_DIR_NAME = ".projectos_state"
 ENCODING = "utf-8"
 EMPTY_TEXT = ""
 FILE_WRITE_MODE = "w"
@@ -67,8 +73,19 @@ PROVIDER_CLASSES = {
 LOGGER_NAME = "projectos"
 EVENT_QUEUE_TIMEOUT_SECONDS = 0.2
 EVENT_THREAD_JOIN_SECONDS = 1.0
+MULTI_PROJECT_THREAD_JOIN_SECONDS = 1.0
 TASK_QUEUE_WORKERS = 4
 FINAL_STATUS_REASON = "ProjectOS stopped cleanly"
+PAYLOAD_KEY_TARGET_AGENT = "target_agent"
+RESTORE_LOG_TEMPLATE = (
+    "Restored {pending_count} pending events and {blocked_count} blocked tasks"
+)
+GIT_REPO_WARNING = "ProjectOS git integration disabled: not a git repo"
+STATUS_KEY_RUNNING = "running"
+STATUS_KEY_ROOT_PATH = "root_path"
+STATUS_KEY_PENDING_COUNT = "pending_count"
+STATUS_KEY_BLOCKED_COUNT = "blocked_count"
+STATUS_KEY_PROVIDERS = "providers"
 
 ProviderFactory = Callable[[str, Path], Any]
 
@@ -110,30 +127,78 @@ class ProjectOS:
         self,
         config_path: Path | str = DEFAULT_CONFIG_PATH,
         provider_factory: Optional[ProviderFactory] = None,
+        project_root: Optional[Path | str] = None,
+        state_dir: Optional[Path | str] = None,
+        project_name: Optional[str] = None,
+        watch_patterns: Optional[list[str]] = None,
+        ignore_patterns: Optional[list[str]] = None,
     ) -> None:
         """Load configuration and initialize ProjectOS runtime components."""
         self.config_path = Path(config_path)
-        self.project_root = self._project_root_for_config(self.config_path)
+        self.project_root = (
+            Path(project_root).resolve()
+            if project_root is not None
+            else self._project_root_for_config(self.config_path)
+        )
+        self.project_name = project_name or self.project_root.name
+        self.state_dir = (
+            Path(state_dir).resolve()
+            if state_dir is not None
+            else self.project_root / STATE_DIR_NAME
+        )
+        self.watch_patterns = watch_patterns
+        self.ignore_patterns = ignore_patterns
         self.config = self._load_config()
         self.provider_factory = provider_factory
-        self.logger = logging.getLogger(LOGGER_NAME)
+        self.logger = logging.getLogger(f"{LOGGER_NAME}.{self.project_name}")
         self.providers = self._initialize_providers()
+        self.provider_health_monitor = ProviderHealthMonitor(
+            self._provider_health_targets()
+        )
+        self.git_manager = self._initialize_git_manager()
         self.agent_registry = AgentRegistry()
         self.event_queue: queue.Queue[AgentEvent] = queue.Queue()
         self.stop_event = threading.Event()
+        self.safety_policy = DefaultSafetyPolicy(self.project_root)
+        self.persistence_manager = PersistenceManager(self.state_dir)
         self.task_queue = TaskQueue(
             max_workers=TASK_QUEUE_WORKERS,
             result_callback=self._handle_agent_result,
+            persistence_manager=self.persistence_manager,
         )
         self.clone_agent = self._initialize_agents()
-        self.trigger_system = TriggerSystem(self.project_root, self.event_queue)
+        self.trigger_system = TriggerSystem(
+            self.project_root,
+            self.event_queue,
+            watch_patterns=self.watch_patterns,
+            ignore_patterns=self.ignore_patterns,
+        )
         self._event_thread: Optional[threading.Thread] = None
+
+    @classmethod
+    def from_project_config(
+        cls,
+        config: ProjectConfig,
+        provider_factory: Optional[ProviderFactory] = None,
+    ) -> "ProjectOS":
+        """Create a ProjectOS runtime from a registered project config."""
+        return cls(
+            config_path=config.models_config,
+            provider_factory=provider_factory,
+            project_root=config.root_path,
+            state_dir=config.state_dir,
+            project_name=config.name,
+            watch_patterns=config.watch_patterns,
+            ignore_patterns=config.ignore_patterns,
+        )
 
     def start(self) -> None:
         """Start trigger watching and event-loop processing."""
         if self._event_thread is not None and self._event_thread.is_alive():
             return
         self.stop_event.clear()
+        self._restore_persisted_queue_state()
+        self.provider_health_monitor.start()
         self.trigger_system.start()
         self._event_thread = threading.Thread(
             target=self._event_loop,
@@ -146,9 +211,14 @@ class ProjectOS:
         """Gracefully stop trigger watching, workers, and event processing."""
         self.stop_event.set()
         self.trigger_system.stop()
+        self.provider_health_monitor.stop()
         if self._event_thread is not None:
             self._event_thread.join(timeout=EVENT_THREAD_JOIN_SECONDS)
         self.task_queue.shutdown(wait=True)
+        self.persistence_manager.snapshot_status(
+            self._agent_statuses(),
+            self.provider_health_monitor.get_status(),
+        )
         self._log_final_status()
 
     def submit_event(self, event: AgentEvent) -> AgentResult:
@@ -169,6 +239,51 @@ class ProjectOS:
         for next_event in result.next_events:
             self.clone_agent.handle(next_event)
 
+    def _restore_persisted_queue_state(self) -> None:
+        """Restore durable pending and blocked queue items."""
+        restored_pending_count = self._restore_pending_events()
+        restored_blocked_count = self._restore_blocked_events()
+        self.logger.info(
+            RESTORE_LOG_TEMPLATE.format(
+                pending_count=restored_pending_count,
+                blocked_count=restored_blocked_count,
+            )
+        )
+
+    def _restore_pending_events(self) -> int:
+        """Load persisted pending events and resubmit dispatchable ones."""
+        restored_count = 0
+        for event in self.persistence_manager.load_pending_events():
+            target_agent = self._target_agent_for_event(event)
+            if target_agent is None:
+                continue
+            self.persistence_manager.clear_pending_event(event.event_id)
+            self.task_queue.submit(event, target_agent)
+            restored_count += 1
+        return restored_count
+
+    def _restore_blocked_events(self) -> int:
+        """Load persisted blocked events into the task queue."""
+        restored_count = 0
+        for event in self.persistence_manager.load_blocked_tasks():
+            target_agent = self._target_agent_for_event(event)
+            if target_agent is None:
+                continue
+            self.task_queue.restore_blocked(event, target_agent)
+            restored_count += 1
+        return restored_count
+
+    def _target_agent_for_event(self, event: AgentEvent) -> Optional[Any]:
+        """Return the registered target agent for a persisted event."""
+        target_agent_name = event.payload.get(PAYLOAD_KEY_TARGET_AGENT)
+        if not isinstance(target_agent_name, str) or not target_agent_name:
+            return None
+        try:
+            return self.agent_registry.get(target_agent_name)
+        except KeyError:
+            self.logger.warning("Persisted event target missing: %s", target_agent_name)
+            return None
+
     def _initialize_providers(self) -> dict[str, Any]:
         """Initialize configured providers for all ProjectOS agents."""
         return {
@@ -178,7 +293,7 @@ class ProjectOS:
 
     def _initialize_agents(self) -> CloneAgent:
         """Initialize and register Clone plus all worker agents."""
-        logger = logging.getLogger(LOGGER_NAME)
+        logger = self.logger
         worker_agents = {
             AGENT_PLANNING: PlanningAgent(
                 self.providers[AGENT_PLANNING],
@@ -189,11 +304,13 @@ class ProjectOS:
                 self.providers[AGENT_CODE_WRITING],
                 logger,
                 project_root=self.project_root,
+                safety_policy=self.safety_policy,
             ),
             AGENT_CODE_REVIEW: CodeReviewAgent(
                 self.providers[AGENT_CODE_REVIEW],
                 logger,
                 project_root=self.project_root,
+                git_manager=self.git_manager,
             ),
             AGENT_ARCHITECTURE: ArchitectureAgent(
                 self.providers[AGENT_ARCHITECTURE],
@@ -237,6 +354,23 @@ class ProjectOS:
         provider_class = PROVIDER_CLASSES[str(provider_name)]
         return provider_class(agent_name, self.config_path)
 
+    def _provider_health_targets(self) -> dict[str, Any]:
+        """Return one provider instance per configured provider name."""
+        health_targets: dict[str, Any] = {}
+        for agent_name, provider in self.providers.items():
+            provider_name = self._agent_config(agent_name).get(CONFIG_KEY_PROVIDER)
+            if isinstance(provider_name, str) and provider_name not in health_targets:
+                health_targets[provider_name] = provider
+        return health_targets
+
+    def _initialize_git_manager(self) -> Optional[GitManager]:
+        """Return a GitManager only when the project root is a git repository."""
+        git_manager = GitManager(self.project_root)
+        if git_manager.is_git_repo():
+            return git_manager
+        self.logger.warning(GIT_REPO_WARNING)
+        return None
+
     def _agent_config(self, agent_name: str) -> Mapping[str, Any]:
         """Return one configured agent mapping."""
         agents = self.config.get(CONFIG_KEY_AGENTS)
@@ -262,6 +396,14 @@ class ProjectOS:
             return resolved_path.parent.parent
         return Path.cwd()
 
+    def _agent_statuses(self) -> dict[str, str]:
+        """Return current agent model assignments for status snapshots."""
+        return {
+            agent_name: str(self.providers[agent_name].get_model_name())
+            for agent_name in ALL_AGENT_NAMES
+            if agent_name in self.providers
+        }
+
     def _log_final_status(self) -> None:
         """Append ProjectOS shutdown status to decisions.log."""
         _append_atomically(
@@ -270,4 +412,76 @@ class ProjectOS:
         )
 
 
-__all__ = ["ProjectOS"]
+class MultiProjectOS:
+    """Run one ProjectOS runtime per enabled registered project."""
+
+    def __init__(self, registry: ProjectRegistry) -> None:
+        """Initialize multi-project orchestration from a project registry."""
+        self.registry = registry
+        self.instances: dict[str, ProjectOS] = {}
+        self._threads: dict[str, threading.Thread] = {}
+        self._lock = threading.Lock()
+        self.logger = logging.getLogger(f"{LOGGER_NAME}.multi")
+
+    def start(self) -> None:
+        """Start all enabled registered projects."""
+        for project_config in self.registry.list_projects():
+            self._start_project(project_config)
+
+    def stop(self) -> None:
+        """Stop all running project instances cleanly."""
+        with self._lock:
+            instances = list(self.instances.items())
+            threads = list(self._threads.values())
+        for project_name, project_os in instances:
+            self.logger.info("[%s] stopping", project_name)
+            project_os.stop()
+        for thread in threads:
+            thread.join(timeout=MULTI_PROJECT_THREAD_JOIN_SECONDS)
+
+    def status(self) -> dict[str, dict[str, Any]]:
+        """Return status by project name."""
+        with self._lock:
+            instances = dict(self.instances)
+        return {
+            project_name: self._project_status(project_os)
+            for project_name, project_os in instances.items()
+        }
+
+    def _start_project(self, config: ProjectConfig) -> None:
+        """Create and start one ProjectOS instance in a thread."""
+        with self._lock:
+            if config.name in self.instances:
+                return
+            project_os = ProjectOS.from_project_config(config)
+            self.instances[config.name] = project_os
+        thread = threading.Thread(
+            target=self._run_project,
+            args=(config.name, project_os),
+            name=f"{LOGGER_NAME}.{config.name}",
+            daemon=True,
+        )
+        with self._lock:
+            self._threads[config.name] = thread
+        thread.start()
+
+    def _run_project(self, project_name: str, project_os: ProjectOS) -> None:
+        """Start one ProjectOS instance with project-prefixed logging."""
+        self.logger.info("[%s] starting", project_name)
+        project_os.start()
+
+    def _project_status(self, project_os: ProjectOS) -> dict[str, Any]:
+        """Return one project status mapping."""
+        return {
+            STATUS_KEY_RUNNING: (
+                project_os._event_thread is not None
+                and project_os._event_thread.is_alive()
+            ),
+            STATUS_KEY_ROOT_PATH: str(project_os.project_root),
+            STATUS_KEY_PENDING_COUNT: project_os.task_queue.get_pending_count(),
+            STATUS_KEY_BLOCKED_COUNT: len(project_os.task_queue.get_blocked()),
+            STATUS_KEY_PROVIDERS: project_os.provider_health_monitor.get_status(),
+        }
+
+
+__all__ = ["MultiProjectOS", "ProjectOS"]

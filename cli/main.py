@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import json
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -11,8 +13,11 @@ from typing import Any, Iterable, Mapping, Optional
 import click
 import yaml
 
+from cli.dashboard import Dashboard
+from core.decision_log import DecisionLogger
 from core.events import AgentEvent, AgentResult, EventType
-from core.projectos import ProjectOS
+from core.project_config import ProjectConfig, ProjectRegistry
+from core.projectos import MultiProjectOS, ProjectOS
 from core.task_queue import TaskQueue
 
 
@@ -28,9 +33,17 @@ TASKS_README_PATH = "tasks/README.md"
 BACKLOG_PATH = "backlog.md"
 DECISIONS_LOG_PATH = "decisions.log"
 ESCALATION_QUEUE_PATH = "escalation_queue.md"
+STATE_DIR_PATH = ".projectos_state"
+LAST_STATUS_FILE = "last_status.json"
 
 CONFIG_KEY_AGENTS = "agents"
 CONFIG_KEY_MODEL = "model"
+CONFIG_KEY_PROVIDERS = "providers"
+STATUS_KEY_TIMESTAMP = "timestamp"
+STATUS_KEY_PENDING_COUNT = "pending_count"
+STATUS_KEY_BLOCKED_COUNT = "blocked_count"
+STATUS_KEY_PROVIDER_HEALTH = "provider_health"
+PROJECT_STATUS_ENABLED = "enabled"
 SOURCE_AGENT_REVIEW_COMMAND = "cli_review"
 PAYLOAD_KEY_FILE_PATH = "file_path"
 PAYLOAD_KEY_MANUAL = "manual"
@@ -38,7 +51,13 @@ PAYLOAD_KEY_MANUAL = "manual"
 STATUS_LABEL_AGENTS = "Agents"
 STATUS_LABEL_PENDING = "Pending tasks count"
 STATUS_LABEL_LAST_ACTIVITY = "Last activity"
+STATUS_LABEL_LAST_SEEN = "Last seen"
+STATUS_LABEL_PERSISTED_PENDING = "Persisted pending count"
+STATUS_LABEL_PERSISTED_BLOCKED = "Persisted blocked count"
+STATUS_LABEL_PROVIDER_HEALTH = "Provider health"
 MISSING_VALUE = "none"
+HEALTHY_VALUE = "Healthy"
+UNREACHABLE_VALUE = "Unreachable"
 PENDING_STATUS = "PENDING"
 APPROVED_STATUS = "APPROVED"
 REJECTED_STATUS = "REJECTED"
@@ -56,7 +75,23 @@ NO_BACKLOG_FOUND = "No backlog found."
 MODEL_CONFIRMATION_TEMPLATE = "Agent {agent_name} now uses {model_name}"
 REVIEW_SUBMITTED_TEMPLATE = "Submitted CODE_CHANGED for {file_path}"
 RUNNING_MESSAGE = "ProjectOS daemon running. Press Ctrl+C to stop."
+RUNNING_ALL_MESSAGE = "ProjectOS multi-project daemon running. Press Ctrl+C to stop."
 SHUTDOWN_MESSAGE = "ProjectOS daemon stopped."
+DASHBOARD_UNAVAILABLE_MESSAGE = "Rich dashboard unavailable; using plain output."
+PROJECTS_EMPTY_MESSAGE = "No projects registered."
+PROJECT_ADDED_TEMPLATE = "Added project {project_name}: {project_path}"
+PROJECT_REMOVED_TEMPLATE = "Removed project {project_name}"
+PROJECTS_HEADER = "name | path | status"
+DECISIONS_TABLE_HEADER = (
+    "timestamp | event_id | agent | category | outcome | escalated | reasoning"
+)
+DECISIONS_EMPTY_MESSAGE = "No decisions found."
+GIT_COMMAND = "git"
+GIT_TIMEOUT_SECONDS = 30
+GIT_AUTHOR_FILTER = "ProjectOS"
+GIT_LOG_LIMIT = "-10"
+NO_AUTO_COMMITS_MESSAGE = "No ProjectOS auto-commits found."
+GIT_LOG_ERROR_MESSAGE = "Unable to read ProjectOS git log."
 
 class ReviewSubmissionTarget:
     """Minimal target that records manually submitted review events."""
@@ -124,6 +159,24 @@ def status(ctx: click.Context) -> None:
         click.echo(f"- {agent_name}: {model_name}")
     click.echo(f"{STATUS_LABEL_PENDING}: {_pending_tasks_count(project_root)}")
     click.echo(f"{STATUS_LABEL_LAST_ACTIVITY}: {_last_activity(project_root)}")
+    persisted_status = _last_status(project_root)
+    click.echo(f"{STATUS_LABEL_PROVIDER_HEALTH}:")
+    for provider_name, healthy in _provider_health(config, persisted_status).items():
+        label = HEALTHY_VALUE if healthy else UNREACHABLE_VALUE
+        click.echo(f"- {provider_name}: {label}")
+    if persisted_status:
+        click.echo(
+            f"{STATUS_LABEL_LAST_SEEN}: "
+            f"{persisted_status.get(STATUS_KEY_TIMESTAMP, MISSING_VALUE)}"
+        )
+        click.echo(
+            f"{STATUS_LABEL_PERSISTED_PENDING}: "
+            f"{persisted_status.get(STATUS_KEY_PENDING_COUNT, 0)}"
+        )
+        click.echo(
+            f"{STATUS_LABEL_PERSISTED_BLOCKED}: "
+            f"{persisted_status.get(STATUS_KEY_BLOCKED_COUNT, 0)}"
+        )
 
 
 @cli.command()
@@ -200,21 +253,126 @@ def review(ctx: click.Context, file_path: Path) -> None:
 
 
 @cli.command()
+@click.option("--dashboard", "use_dashboard", is_flag=True)
+@click.option("--all", "run_all", is_flag=True)
 @click.pass_context
-def run(ctx: click.Context) -> None:
+def run(ctx: click.Context, use_dashboard: bool, run_all: bool) -> None:
     """Run the trigger system, Clone Agent, and task queue until interrupted."""
+    if run_all:
+        _run_all_projects()
+        return
+
     project_root = _project_root(ctx)
     project_os = ProjectOS(project_root / CONFIG_PATH)
+    dashboard = _dashboard(project_os) if use_dashboard else None
     project_os.start()
-    click.echo(RUNNING_MESSAGE)
+    if dashboard is not None:
+        dashboard.run()
+        if not dashboard.is_available:
+            click.echo(DASHBOARD_UNAVAILABLE_MESSAGE)
+            click.echo(RUNNING_MESSAGE)
+    else:
+        click.echo(RUNNING_MESSAGE)
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:
+        if dashboard is not None:
+            dashboard.stop()
         project_os.stop()
         click.echo(SHUTDOWN_MESSAGE)
+
+
+@cli.group()
+def projects() -> None:
+    """Manage registered ProjectOS projects."""
+
+
+@projects.command(name="list")
+def projects_list() -> None:
+    """List registered enabled ProjectOS projects."""
+    registry = ProjectRegistry()
+    project_configs = registry.list_projects()
+    if not project_configs:
+        click.echo(PROJECTS_EMPTY_MESSAGE)
+        return
+    click.echo(PROJECTS_HEADER)
+    for project_config in project_configs:
+        click.echo(_project_row(project_config))
+
+
+@projects.command(name="add")
+@click.option("--name", "project_name", required=True)
+@click.option(
+    "--path",
+    "project_path",
+    required=True,
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+)
+def projects_add(project_name: str, project_path: Path) -> None:
+    """Add one project to the global ProjectOS registry."""
+    registry = ProjectRegistry()
+    project_config = ProjectConfig.create(project_name, project_path)
+    registry.add_project(project_config)
+    click.echo(
+        PROJECT_ADDED_TEMPLATE.format(
+            project_name=project_config.name,
+            project_path=project_config.root_path,
+        )
+    )
+
+
+@projects.command(name="remove")
+@click.option("--name", "project_name", required=True)
+def projects_remove(project_name: str) -> None:
+    """Remove one project from the global ProjectOS registry."""
+    registry = ProjectRegistry()
+    registry.remove_project(project_name)
+    click.echo(PROJECT_REMOVED_TEMPLATE.format(project_name=project_name))
+
+
+@cli.command(name="git-log")
+@click.pass_context
+def git_log(ctx: click.Context) -> None:
+    """Show recent auto-commits made by ProjectOS."""
+    project_root = _project_root(ctx)
+    completed_process = _git_log(project_root)
+    if completed_process is None:
+        click.echo(GIT_LOG_ERROR_MESSAGE)
+        return
+    if completed_process.returncode != 0 or not completed_process.stdout.strip():
+        click.echo(NO_AUTO_COMMITS_MESSAGE)
+        return
+    click.echo(completed_process.stdout.rstrip())
+
+
+@cli.command()
+@click.option("--tail", type=int, default=20, show_default=True)
+@click.option("--summary", "show_summary", is_flag=True)
+@click.option("--agent", "agent_name", default=None)
+@click.pass_context
+def decisions(
+    ctx: click.Context,
+    tail: int,
+    show_summary: bool,
+    agent_name: Optional[str],
+) -> None:
+    """Show machine-readable Clone decisions from decisions.jsonl."""
+    project_root = _project_root(ctx)
+    decision_logger = DecisionLogger(project_root)
+    if show_summary:
+        click.echo(json.dumps(decision_logger.summary(), indent=2, sort_keys=True))
+        return
+
+    records = decision_logger.query(agent_name=agent_name, limit=tail)
+    if not records:
+        click.echo(DECISIONS_EMPTY_MESSAGE)
+        return
+    click.echo(DECISIONS_TABLE_HEADER)
+    for record in records:
+        click.echo(_decision_table_row(record))
 
 
 def _project_root(ctx: click.Context) -> Path:
@@ -235,6 +393,43 @@ def _review_target_agent(ctx: click.Context) -> Any:
     if ctx.obj is not None and "review_target_agent" in ctx.obj:
         return ctx.obj["review_target_agent"]
     return ReviewSubmissionTarget()
+
+
+def _run_all_projects() -> None:
+    """Run all enabled registered projects until interrupted."""
+    multi_project_os = MultiProjectOS(ProjectRegistry())
+    multi_project_os.start()
+    click.echo(RUNNING_ALL_MESSAGE)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        multi_project_os.stop()
+        click.echo(SHUTDOWN_MESSAGE)
+
+
+def _dashboard(project_os: ProjectOS) -> Dashboard:
+    """Return a dashboard connected to the running ProjectOS instance."""
+    return Dashboard(
+        task_queue=project_os.task_queue,
+        decision_logger=DecisionLogger(project_os.project_root),
+        persistence_manager=project_os.persistence_manager,
+        health_monitor=project_os.provider_health_monitor,
+    )
+
+
+def _project_row(project_config: ProjectConfig) -> str:
+    """Return one formatted projects list row."""
+    status = PROJECT_STATUS_ENABLED if project_config.enabled else MISSING_VALUE
+    return " | ".join(
+        [
+            project_config.name,
+            str(project_config.root_path),
+            status,
+        ]
+    )
 
 
 def _load_config(project_root: Path) -> Mapping[str, Any]:
@@ -262,6 +457,23 @@ def _agent_configs(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         str(agent_name): agent_config
         for agent_name, agent_config in agents.items()
         if isinstance(agent_config, dict)
+    }
+
+
+def _provider_health(
+    config: Mapping[str, Any],
+    persisted_status: Mapping[str, Any],
+) -> dict[str, bool]:
+    """Return last known provider health by provider name."""
+    providers = config.get(CONFIG_KEY_PROVIDERS)
+    if not isinstance(providers, Mapping):
+        return {}
+    persisted_health = persisted_status.get(STATUS_KEY_PROVIDER_HEALTH, {})
+    if not isinstance(persisted_health, Mapping):
+        persisted_health = {}
+    return {
+        str(provider_name): bool(persisted_health.get(str(provider_name), False))
+        for provider_name in providers
     }
 
 
@@ -293,6 +505,54 @@ def _last_activity(project_root: Path) -> str:
     if last_line.startswith("[") and "]" in last_line:
         return last_line[1 : last_line.index("]")]
     return MISSING_VALUE
+
+
+def _last_status(project_root: Path) -> Mapping[str, Any]:
+    """Return the last persisted runtime status when available."""
+    status_path = project_root / STATE_DIR_PATH / LAST_STATUS_FILE
+    if not status_path.exists():
+        return {}
+    try:
+        status = json.loads(status_path.read_text(encoding=ENCODING))
+    except json.JSONDecodeError:
+        return {}
+    return status if isinstance(status, Mapping) else {}
+
+
+def _git_log(project_root: Path) -> Optional[subprocess.CompletedProcess[str]]:
+    """Return recent ProjectOS authord git log entries without raising."""
+    try:
+        return subprocess.run(
+            [
+                GIT_COMMAND,
+                "log",
+                f"--author={GIT_AUTHOR_FILTER}",
+                "--oneline",
+                GIT_LOG_LIMIT,
+            ],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+
+
+def _decision_table_row(record: Mapping[str, Any]) -> str:
+    """Return one formatted decision table row."""
+    return " | ".join(
+        [
+            str(record.get("timestamp", MISSING_VALUE)),
+            str(record.get("event_id", MISSING_VALUE)),
+            str(record.get("agent_name", MISSING_VALUE)),
+            str(record.get("decision_category", MISSING_VALUE)),
+            str(record.get("outcome", MISSING_VALUE)),
+            str(record.get("escalated", False)),
+            str(record.get("reasoning", MISSING_VALUE)).replace(NEWLINE, " "),
+        ]
+    )
 
 
 def _updated_escalation_lines(lines: Iterable[str]) -> list[str]:

@@ -1,0 +1,470 @@
+"""Rich terminal dashboard for ProjectOS runtime activity."""
+
+from __future__ import annotations
+
+import json
+import threading
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Optional
+
+from core.decision_log import DecisionLogger
+from core.persistence import PersistenceManager
+from core.provider_health import ProviderHealthMonitor
+from core.task_queue import TaskQueue
+
+try:
+    from rich.layout import Layout
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.table import Table
+except ImportError:
+    Layout = None
+    Live = None
+    Panel = None
+    Table = None
+
+
+DEFAULT_REFRESH_INTERVAL = 1.0
+THREAD_NAME = "projectos-dashboard"
+
+STATUS_RUNNING = "RUNNING"
+STATUS_STOPPED = "STOPPED"
+STATUS_IDLE = "IDLE"
+STATUS_ACTIVE = "ACTIVE"
+STATUS_HEALTHY = "Healthy"
+STATUS_DOWN = "Down"
+
+AGENT_NAMES = (
+    "clone",
+    "planning",
+    "code_writing",
+    "code_review",
+    "architecture",
+    "test",
+    "docs",
+)
+
+TITLE_PROJECTOS_DASHBOARD = "ProjectOS Dashboard"
+TITLE_AGENTS = "Agents"
+TITLE_PROVIDERS = "Providers"
+TITLE_QUEUE = "Queue"
+TITLE_RECENT_DECISIONS = "Recent Decisions (last 5)"
+
+LAYOUT_ROOT = "root"
+LAYOUT_HEADER = "header"
+LAYOUT_BODY = "body"
+LAYOUT_AGENTS = "agents"
+LAYOUT_PROVIDERS = "providers"
+LAYOUT_QUEUE = "queue"
+LAYOUT_DECISIONS = "decisions"
+
+COLUMN_AGENT = "Agent"
+COLUMN_STATUS = "Status"
+COLUMN_PROVIDER = "Provider"
+COLUMN_HEALTH = "Health"
+COLUMN_TIME = "Time"
+COLUMN_CATEGORY = "Category"
+COLUMN_OUTCOME = "Outcome"
+
+FIELD_TIMESTAMP = "timestamp"
+FIELD_AGENT_NAME = "agent_name"
+FIELD_DECISION_CATEGORY = "decision_category"
+FIELD_OUTCOME = "outcome"
+FIELD_REASONING = "reasoning"
+STATUS_KEY_AGENT_STATUSES = "agent_statuses"
+
+TEXT_TRUE_ICON = "✓"
+TEXT_FALSE_ICON = "✗"
+TEXT_NONE = "none"
+TEXT_SEPARATOR = " | "
+TEXT_NEWLINE = "\n"
+TEXT_HEADER_TEMPLATE = "Status: {status} | Uptime: {uptime} | Tasks: {tasks}"
+TEXT_QUEUE_TEMPLATE = (
+    "Pending: {pending}  Blocked: {blocked}  Completed today: {completed}"
+)
+TEXT_PROVIDER_TEMPLATE = "{icon} {status}"
+TEXT_DECISION_TEMPLATE = "{time} {agent} {category} {outcome}"
+ENCODING = "utf-8"
+
+SECONDS_PER_HOUR = 3600
+SECONDS_PER_MINUTE = 60
+DECISION_LIMIT = 5
+SUMMARY_DECISION_LIMIT = 1000
+MIN_REFRESH_PER_SECOND = 1
+TIMESTAMP_TIME_LENGTH = 8
+
+
+@dataclass(frozen=True)
+class AgentStatus:
+    """One dashboard agent status row."""
+
+    name: str
+    status: str
+
+
+@dataclass(frozen=True)
+class ProviderStatus:
+    """One provider health row."""
+
+    name: str
+    healthy: bool
+
+
+@dataclass(frozen=True)
+class QueueSummary:
+    """Queue counts shown by the dashboard."""
+
+    pending: int
+    blocked: int
+    completed_today: int
+
+
+@dataclass(frozen=True)
+class DecisionRow:
+    """One recent decision row."""
+
+    timestamp: str
+    agent_name: str
+    decision_category: str
+    outcome: str
+    reasoning: str
+
+
+@dataclass(frozen=True)
+class DashboardData:
+    """Complete dashboard snapshot for rendering and tests."""
+
+    status: str
+    uptime: str
+    agents: tuple[AgentStatus, ...]
+    providers: tuple[ProviderStatus, ...]
+    queue: QueueSummary
+    recent_decisions: tuple[DecisionRow, ...]
+
+
+class Dashboard:
+    """Render ProjectOS runtime state in a non-blocking terminal dashboard."""
+
+    def __init__(
+        self,
+        task_queue: TaskQueue,
+        decision_logger: DecisionLogger,
+        persistence_manager: PersistenceManager,
+        health_monitor: ProviderHealthMonitor,
+        refresh_interval: float = DEFAULT_REFRESH_INTERVAL,
+    ) -> None:
+        """Initialize dashboard component references and thread state."""
+        self.task_queue = task_queue
+        self.decision_logger = decision_logger
+        self.persistence_manager = persistence_manager
+        self.health_monitor = health_monitor
+        self.refresh_interval = max(float(refresh_interval), 0.1)
+        self._started_at = datetime.now(timezone.utc)
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def run(self) -> None:
+        """Start the live dashboard in a daemon thread when Rich is available."""
+        if Live is None:
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run_live_loop,
+            name=THREAD_NAME,
+            daemon=True,
+        )
+        self._thread.start()
+
+    @property
+    def is_available(self) -> bool:
+        """Return whether the Rich dashboard renderer is importable."""
+        return Live is not None
+
+    def stop(self) -> None:
+        """Stop the dashboard thread without raising."""
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.refresh_interval * 2)
+
+    def layout_data(self) -> DashboardData:
+        """Fetch current dashboard data from ProjectOS components."""
+        pending_count = self._pending_count()
+        blocked_count = self._blocked_count()
+        recent_decisions = self._recent_decisions()
+        return DashboardData(
+            status=STATUS_STOPPED if self._stop_event.is_set() else STATUS_RUNNING,
+            uptime=self._uptime(),
+            agents=self._agent_statuses(pending_count),
+            providers=self._provider_statuses(),
+            queue=QueueSummary(
+                pending=pending_count,
+                blocked=blocked_count,
+                completed_today=self._completed_today(),
+            ),
+            recent_decisions=recent_decisions,
+        )
+
+    def render(self) -> Any:
+        """Build a Rich renderable or plain text fallback."""
+        data = self.layout_data()
+        if Layout is None or Panel is None or Table is None:
+            return self._plain_render(data)
+        layout = Layout(name=LAYOUT_ROOT)
+        layout.split_column(
+            Layout(
+                Panel(self._header_text(data), title=TITLE_PROJECTOS_DASHBOARD),
+                name=LAYOUT_HEADER,
+                size=3,
+            ),
+            Layout(name=LAYOUT_BODY, ratio=2),
+            Layout(
+                Panel(self._queue_text(data.queue), title=TITLE_QUEUE),
+                name=LAYOUT_QUEUE,
+                size=3,
+            ),
+            Layout(
+                Panel(
+                    self._decisions_table(data.recent_decisions),
+                    title=TITLE_RECENT_DECISIONS,
+                ),
+                name=LAYOUT_DECISIONS,
+                ratio=2,
+            ),
+        )
+        layout[LAYOUT_BODY].split_row(
+            Layout(
+                Panel(self._agents_table(data.agents), title=TITLE_AGENTS),
+                name=LAYOUT_AGENTS,
+            ),
+            Layout(
+                Panel(self._providers_table(data.providers), title=TITLE_PROVIDERS),
+                name=LAYOUT_PROVIDERS,
+            ),
+        )
+        return layout
+
+    def _run_live_loop(self) -> None:
+        """Refresh the Rich Live display until stop is requested."""
+        if Live is None:
+            return
+        with Live(
+            self.render(),
+            refresh_per_second=self._refresh_per_second(),
+            screen=False,
+        ) as live:
+            while not self._stop_event.wait(self.refresh_interval):
+                live.update(self.render())
+
+    def _refresh_per_second(self) -> int:
+        """Return the Rich refresh-per-second setting."""
+        return max(int(1 / self.refresh_interval), MIN_REFRESH_PER_SECOND)
+
+    def _pending_count(self) -> int:
+        """Return pending task count from the live queue."""
+        try:
+            return int(self.task_queue.get_pending_count())
+        except Exception:
+            return 0
+
+    def _blocked_count(self) -> int:
+        """Return blocked task count from the live queue."""
+        try:
+            return len(self.task_queue.get_blocked())
+        except Exception:
+            return 0
+
+    def _agent_statuses(self, pending_count: int) -> tuple[AgentStatus, ...]:
+        """Return agent statuses from persisted state with live fallback."""
+        persisted_statuses = self._persisted_agent_statuses()
+        if persisted_statuses:
+            return tuple(
+                AgentStatus(name=name, status=status)
+                for name, status in persisted_statuses.items()
+            )
+        default_status = STATUS_ACTIVE if pending_count else STATUS_IDLE
+        return tuple(AgentStatus(name=name, status=default_status) for name in AGENT_NAMES)
+
+    def _persisted_agent_statuses(self) -> dict[str, str]:
+        """Return persisted agent status values from the status snapshot."""
+        payload = self._status_payload()
+        agent_statuses = payload.get(STATUS_KEY_AGENT_STATUSES)
+        if not isinstance(agent_statuses, Mapping):
+            return {}
+        return {
+            str(agent_name): str(status)
+            for agent_name, status in agent_statuses.items()
+        }
+
+    def _provider_statuses(self) -> tuple[ProviderStatus, ...]:
+        """Return provider health from the health monitor."""
+        try:
+            statuses = self.health_monitor.get_status()
+        except Exception:
+            statuses = {}
+        if not isinstance(statuses, Mapping):
+            return tuple()
+        return tuple(
+            ProviderStatus(name=str(provider_name), healthy=bool(healthy))
+            for provider_name, healthy in statuses.items()
+        )
+
+    def _recent_decisions(self) -> tuple[DecisionRow, ...]:
+        """Return the most recent decision log rows."""
+        records = self._decision_records(DECISION_LIMIT)
+        return tuple(self._decision_row(record) for record in records)
+
+    def _completed_today(self) -> int:
+        """Return the count of decision records written today."""
+        today = datetime.now(timezone.utc).date()
+        return sum(
+            1
+            for record in self._decision_records(SUMMARY_DECISION_LIMIT)
+            if self._record_date(record) == today
+        )
+
+    def _decision_records(self, limit: int) -> list[Mapping[str, Any]]:
+        """Return recent decision records from the decision logger."""
+        try:
+            records = self.decision_logger.query(limit=limit)
+        except Exception:
+            return []
+        return [record for record in records if isinstance(record, Mapping)]
+
+    def _record_date(self, record: Mapping[str, Any]) -> Any:
+        """Return a decision record date or None when unavailable."""
+        timestamp = record.get(FIELD_TIMESTAMP)
+        if not isinstance(timestamp, str):
+            return None
+        try:
+            return datetime.fromisoformat(timestamp).date()
+        except ValueError:
+            return None
+
+    def _decision_row(self, record: Mapping[str, Any]) -> DecisionRow:
+        """Convert one decision mapping to a display row."""
+        return DecisionRow(
+            timestamp=self._time_text(record.get(FIELD_TIMESTAMP)),
+            agent_name=str(record.get(FIELD_AGENT_NAME, TEXT_NONE)),
+            decision_category=str(record.get(FIELD_DECISION_CATEGORY, TEXT_NONE)),
+            outcome=str(record.get(FIELD_OUTCOME, TEXT_NONE)),
+            reasoning=str(record.get(FIELD_REASONING, TEXT_NONE)),
+        )
+
+    def _status_payload(self) -> Mapping[str, Any]:
+        """Read the persisted status snapshot when it exists."""
+        status_path = self.persistence_manager.status_path
+        if not isinstance(status_path, Path) or not status_path.exists():
+            return {}
+        try:
+            payload = json.loads(status_path.read_text(encoding=ENCODING))
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return payload if isinstance(payload, Mapping) else {}
+
+    def _uptime(self) -> str:
+        """Return dashboard uptime as HH:MM:SS."""
+        elapsed_seconds = int(
+            (datetime.now(timezone.utc) - self._started_at).total_seconds()
+        )
+        hours = elapsed_seconds // SECONDS_PER_HOUR
+        minutes = (elapsed_seconds % SECONDS_PER_HOUR) // SECONDS_PER_MINUTE
+        seconds = elapsed_seconds % SECONDS_PER_MINUTE
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def _time_text(self, value: Any) -> str:
+        """Return HH:MM:SS from an ISO timestamp or a placeholder."""
+        if not isinstance(value, str):
+            return TEXT_NONE
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return value[:TIMESTAMP_TIME_LENGTH]
+        return parsed.strftime("%H:%M:%S")
+
+    def _plain_render(self, data: DashboardData) -> str:
+        """Return a plain text dashboard when Rich is unavailable."""
+        lines = [
+            TITLE_PROJECTOS_DASHBOARD,
+            self._header_text(data),
+            self._queue_text(data.queue),
+        ]
+        lines.extend(
+            TEXT_DECISION_TEMPLATE.format(
+                time=decision.timestamp,
+                agent=decision.agent_name,
+                category=decision.decision_category,
+                outcome=decision.outcome,
+            )
+            for decision in data.recent_decisions
+        )
+        return TEXT_NEWLINE.join(lines)
+
+    def _header_text(self, data: DashboardData) -> str:
+        """Return dashboard header text."""
+        return TEXT_HEADER_TEMPLATE.format(
+            status=data.status,
+            uptime=data.uptime,
+            tasks=data.queue.pending,
+        )
+
+    def _queue_text(self, queue_summary: QueueSummary) -> str:
+        """Return queue summary text."""
+        return TEXT_QUEUE_TEMPLATE.format(
+            pending=queue_summary.pending,
+            blocked=queue_summary.blocked,
+            completed=queue_summary.completed_today,
+        )
+
+    def _agents_table(self, agents: tuple[AgentStatus, ...]) -> Any:
+        """Return the Rich agents table."""
+        table = Table(title=TITLE_AGENTS)
+        table.add_column(COLUMN_AGENT)
+        table.add_column(COLUMN_STATUS)
+        for agent in agents:
+            table.add_row(agent.name, agent.status)
+        return table
+
+    def _providers_table(self, providers: tuple[ProviderStatus, ...]) -> Any:
+        """Return the Rich providers table."""
+        table = Table(title=TITLE_PROVIDERS)
+        table.add_column(COLUMN_PROVIDER)
+        table.add_column(COLUMN_HEALTH)
+        for provider in providers:
+            table.add_row(provider.name, self._provider_health_text(provider))
+        return table
+
+    def _decisions_table(self, decisions: tuple[DecisionRow, ...]) -> Any:
+        """Return the Rich recent decisions table."""
+        table = Table()
+        table.add_column(COLUMN_TIME)
+        table.add_column(COLUMN_AGENT)
+        table.add_column(COLUMN_CATEGORY)
+        table.add_column(COLUMN_OUTCOME)
+        for decision in decisions:
+            table.add_row(
+                decision.timestamp,
+                decision.agent_name,
+                decision.decision_category,
+                decision.outcome,
+            )
+        return table
+
+    def _provider_health_text(self, provider: ProviderStatus) -> str:
+        """Return provider health text with a compact status marker."""
+        icon = TEXT_TRUE_ICON if provider.healthy else TEXT_FALSE_ICON
+        status = STATUS_HEALTHY if provider.healthy else STATUS_DOWN
+        return TEXT_PROVIDER_TEMPLATE.format(icon=icon, status=status)
+
+
+__all__ = [
+    "AgentStatus",
+    "Dashboard",
+    "DashboardData",
+    "DecisionRow",
+    "ProviderStatus",
+    "QueueSummary",
+]

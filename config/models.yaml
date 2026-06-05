@@ -36,3 +36,12 @@ agents:
   docs:
     provider: gemini
     model: gemini-flash
+
+fallback_chain:
+  planning: [deepseek-v3, ollama-deepseek-r1, ollama-llama3]
+  code_writing: [openrouter-free, ollama-codellama, ollama-llama3]
+  code_review: [openrouter-free, ollama-codellama]
+  clone: [gemini-flash, ollama-llama3]
+  test: [openrouter-free, ollama-codellama]
+  docs: [gemini-flash, ollama-llama3]
+  architecture: [deepseek-v3, ollama-deepseek-r1]

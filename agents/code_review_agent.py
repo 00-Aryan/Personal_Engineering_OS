@@ -13,6 +13,7 @@ from typing import Any, List, Mapping, Optional, Sequence
 
 from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventType
+from core.git_manager import GitManager
 from core.model_provider import ModelProvider
 
 
@@ -120,8 +121,13 @@ DECISION_REASON_MISSING_PAYLOAD = "code review event missing required payload"
 DECISION_REASON_FILE_NOT_FOUND = "code review target file not found"
 DECISION_REASON_INVALID_JSON = "model returned invalid review JSON"
 DECISION_REASON_UNSUPPORTED_EVENT = "code review received unsupported event type"
+DECISION_REASON_COMMIT_SKIPPED_CRITICAL = "commit skipped: critical issues found"
+DECISION_REASON_COMMIT_CREATED_TEMPLATE = "auto-commit created for {file_path}: {commit_hash}"
+DECISION_REASON_COMMIT_SKIPPED_TEMPLATE = "auto-commit skipped for {file_path}"
 ESCALATION_REASON_CRITICAL = "critical code review issues found"
 LOGGER_ERROR_FORMAT = "%s: %s"
+COMMIT_MESSAGE_TEMPLATE = "projectos: auto-review passed \u2014 {filename} {summary}"
+COMMIT_SUMMARY_TEMPLATE = "issues-{total_issues}-blockers-{blockers}"
 
 OUTPUT_KEY_ERROR = "error"
 OUTPUT_KEY_ISSUES = "issues"
@@ -204,10 +210,12 @@ class CodeReviewAgent(BaseAgent):
         model_provider: ModelProvider,
         logger: logging.Logger,
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
+        git_manager: Optional[GitManager] = None,
     ) -> None:
         """Initialize CodeReviewAgent with model access and review paths."""
         super().__init__(AGENT_NAME, ROLE_DESCRIPTION, model_provider, logger)
         self.project_root = Path(project_root)
+        self.git_manager = git_manager
         self._ensure_reviews_dir()
 
     def handle(self, event: AgentEvent) -> AgentResult:
@@ -249,6 +257,7 @@ class CodeReviewAgent(BaseAgent):
             total_issues=len(issues),
             blockers=blocker_count,
         )
+        self._auto_commit_reviewed_file(file_path, len(issues), blocker_count)
         self._log_decision(event, DECISION_SUCCESS, reasoning)
         return AgentResult(
             success=True,
@@ -519,6 +528,51 @@ class CodeReviewAgent(BaseAgent):
                 updated_lines[index] = f"{BACKLOG_STATUS_PREFIX} {status}"
                 return updated_lines
         return updated_lines
+
+    def _auto_commit_reviewed_file(
+        self,
+        file_path: Path,
+        total_issues: int,
+        blocker_count: int,
+    ) -> None:
+        """Auto-commit a reviewed file when review has no critical blockers."""
+        if blocker_count:
+            self.logger.info(DECISION_REASON_COMMIT_SKIPPED_CRITICAL)
+            return
+        if self.git_manager is None:
+            return
+
+        staged = self.git_manager.stage_file(file_path)
+        if not staged:
+            self.logger.info(
+                DECISION_REASON_COMMIT_SKIPPED_TEMPLATE.format(
+                    file_path=str(file_path),
+                )
+            )
+            return
+
+        commit_hash = self.git_manager.commit(
+            COMMIT_MESSAGE_TEMPLATE.format(
+                filename=file_path.name,
+                summary=COMMIT_SUMMARY_TEMPLATE.format(
+                    total_issues=total_issues,
+                    blockers=blocker_count,
+                ),
+            )
+        )
+        if commit_hash is None:
+            self.logger.info(
+                DECISION_REASON_COMMIT_SKIPPED_TEMPLATE.format(
+                    file_path=str(file_path),
+                )
+            )
+            return
+        self.logger.info(
+            DECISION_REASON_COMMIT_CREATED_TEMPLATE.format(
+                file_path=str(file_path),
+                commit_hash=commit_hash,
+            )
+        )
 
     def _failure_result(self, event: AgentEvent, reason: str) -> AgentResult:
         """Log and return a non-crashing failure result."""

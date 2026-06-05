@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, List, Optional, Tuple
 
 from core.events import AgentEvent, AgentResult, EventType
+from core.persistence import PersistenceManager
 
 
 DEFAULT_MAX_WORKERS = 4
@@ -33,6 +34,7 @@ class TaskQueue:
         self,
         max_workers: int = DEFAULT_MAX_WORKERS,
         result_callback: Optional[Callable[[AgentResult], None]] = None,
+        persistence_manager: Optional[PersistenceManager] = None,
     ) -> None:
         """Initialize the queue with a bounded worker pool."""
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -41,6 +43,7 @@ class TaskQueue:
         self._lock = threading.Lock()
         self._logger = logging.getLogger(LOGGER_NAME)
         self._result_callback = result_callback
+        self._persistence_manager = persistence_manager
 
     def submit(
         self,
@@ -51,12 +54,21 @@ class TaskQueue:
         try:
             if self._should_block(event):
                 self._store_blocked(event, target_agent)
+                if self._persistence_manager is not None:
+                    self._persistence_manager.save_blocked_task(event)
                 return None
 
+            if self._persistence_manager is not None:
+                self._persistence_manager.save_pending_event(event)
             future = self._executor.submit(self._run_target_agent, event, target_agent)
             with self._lock:
                 self._pending_count += 1
-            future.add_done_callback(self._mark_done)
+            future.add_done_callback(
+                lambda completed_future, event_id=event.event_id: self._mark_done(
+                    completed_future,
+                    event_id,
+                )
+            )
             return future
         except Exception as error:
             self._logger.exception("TaskQueue submit failed: %s", error)
@@ -108,12 +120,25 @@ class TaskQueue:
                 blocked_task = self._blocked_tasks.pop(correlation_id, None)
             if blocked_task is None:
                 return None
+            if self._persistence_manager is not None:
+                self._persistence_manager.clear_blocked_task(correlation_id)
 
             resumed_event = self._permission_granted_event(blocked_task.event)
             return self.submit(resumed_event, blocked_task.target_agent)
         except Exception as error:
             self._logger.exception("TaskQueue unblock failed: %s", error)
             return None
+
+    def restore_blocked(
+        self,
+        event: AgentEvent,
+        target_agent: Any,
+    ) -> None:
+        """Restore one blocked event into the in-memory blocked task map."""
+        try:
+            self._store_blocked(event, target_agent)
+        except Exception as error:
+            self._logger.exception("TaskQueue restore_blocked failed: %s", error)
 
     def shutdown(self, wait: bool = True) -> None:
         """Shutdown the underlying executor without raising to the caller."""
@@ -137,9 +162,15 @@ class TaskQueue:
             self._logger.exception("Target agent execution failed: %s", error)
             return None
 
-    def _mark_done(self, future: Future[Optional[AgentResult]]) -> None:
+    def _mark_done(
+        self,
+        future: Future[Optional[AgentResult]],
+        event_id: str,
+    ) -> None:
         """Decrement pending task count after a submitted future completes."""
         try:
+            if self._persistence_manager is not None:
+                self._persistence_manager.clear_pending_event(event_id)
             with self._lock:
                 self._pending_count = max(self._pending_count - 1, 0)
         except Exception as error:

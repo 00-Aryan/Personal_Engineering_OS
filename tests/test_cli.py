@@ -10,6 +10,7 @@ import yaml
 from click.testing import CliRunner
 
 from cli.main import cli
+from core.decision_log import DecisionLogger
 from core.events import AgentEvent
 
 
@@ -23,6 +24,14 @@ PLANNING_AGENT = "planning"
 UPDATED_MODEL = "test-model"
 SOURCE_FILE = "example.py"
 SOURCE_CODE = "value = 1\n"
+EVENT_ID_ONE = "event-1"
+EVENT_ID_TWO = "event-2"
+CLONE_AGENT = "clone"
+PLANNING_AGENT_NAME = "planning"
+AUTONOMOUS_CATEGORY = "AUTONOMOUS"
+ESCALATE_CATEGORY = "ESCALATE"
+REASONING = "reason"
+OUTCOME = "outcome"
 
 
 class CapturingTaskQueue:
@@ -124,6 +133,90 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(event.payload["file_path"], str(source_path))
         self.assertEqual(event.event_type.value, "CODE_CHANGED")
         self.assertIsNotNone(target_agent)
+
+    def test_decisions_command_shows_tail(self) -> None:
+        """Verify decisions command prints recent JSONL decisions."""
+        decision_logger = DecisionLogger(self.project_root)
+        decision_logger.log(
+            EVENT_ID_ONE,
+            None,
+            CLONE_AGENT,
+            AUTONOMOUS_CATEGORY,
+            REASONING,
+            OUTCOME,
+        )
+        decision_logger.log(
+            EVENT_ID_TWO,
+            None,
+            CLONE_AGENT,
+            ESCALATE_CATEGORY,
+            REASONING,
+            OUTCOME,
+            escalated=True,
+        )
+
+        result = self.runner.invoke(
+            cli,
+            ["decisions", "--tail", "1"],
+            obj={"project_root": self.project_root},
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn(EVENT_ID_TWO, result.output)
+        self.assertNotIn(EVENT_ID_ONE, result.output)
+
+    def test_decisions_command_filters_agent(self) -> None:
+        """Verify decisions command filters by agent name."""
+        decision_logger = DecisionLogger(self.project_root)
+        decision_logger.log(
+            EVENT_ID_ONE,
+            None,
+            CLONE_AGENT,
+            AUTONOMOUS_CATEGORY,
+            REASONING,
+            OUTCOME,
+        )
+        decision_logger.log(
+            EVENT_ID_TWO,
+            None,
+            PLANNING_AGENT_NAME,
+            AUTONOMOUS_CATEGORY,
+            REASONING,
+            OUTCOME,
+        )
+
+        result = self.runner.invoke(
+            cli,
+            ["decisions", "--agent", PLANNING_AGENT_NAME],
+            obj={"project_root": self.project_root},
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn(EVENT_ID_TWO, result.output)
+        self.assertNotIn(EVENT_ID_ONE, result.output)
+
+    def test_decisions_command_summary(self) -> None:
+        """Verify decisions command prints JSON summary output."""
+        decision_logger = DecisionLogger(self.project_root)
+        decision_logger.log(
+            EVENT_ID_ONE,
+            None,
+            CLONE_AGENT,
+            ESCALATE_CATEGORY,
+            REASONING,
+            OUTCOME,
+            escalated=True,
+        )
+
+        result = self.runner.invoke(
+            cli,
+            ["decisions", "--summary"],
+            obj={"project_root": self.project_root},
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn('"total_decisions": 1', result.output)
+        self.assertIn('"escalation_rate": 1.0', result.output)
 
     def _write_config(self) -> None:
         """Write a minimal model config."""

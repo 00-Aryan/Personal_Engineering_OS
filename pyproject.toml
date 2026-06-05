@@ -1,14 +1,22 @@
 [project]
-name = "personal-engineering-os"
-version = "0.1.0"
-description = "Add your description here"
+name = "projectos"
+version = "0.2.0"
+description = "Personal Engineering OS — autonomous multi-agent system for software project management"
+authors = [{ name = "Aryan Kumar", email = "22f2000697@ds.study.iitm.ac.in" }]
+license = { text = "MIT" }
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "click>=8.0.0",
-    "pytest>=9.0.3",
     "pyyaml>=6.0.1",
     "requests>=2.31.0",
+    "rich>=13.0.0",
+    "watchdog>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.3",
 ]
 
 [project.scripts]
