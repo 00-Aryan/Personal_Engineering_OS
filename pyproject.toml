@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "projectos"
 version = "0.2.0"
 description = "Personal Engineering OS — autonomous multi-agent system for software project management"
 authors = [{ name = "Aryan Kumar", email = "22f2000697@ds.study.iitm.ac.in" }]
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -26,5 +27,15 @@ dev = [
 [project.scripts]
 projectos = "cli.main:cli"
 
-[tool.setuptools]
-packages = ["cli", "core", "agents", "config", "reviews", "providers", "mcp_server"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "cli*",
+    "core*",
+    "agents*",
+    "config*",
+    "reviews*",
+    "providers*",
+    "mcp_server*",
+]
+namespaces = true
