@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "projectos"
 version = "0.2.0"
@@ -22,5 +26,5 @@ dev = [
 [project.scripts]
 projectos = "cli.main:cli"
 
-[tool.setuptools.packages.find]
-include = ["cli", "core", "agents", "config", "reviews", "providers", "mcp_server"]
+[tool.setuptools]
+packages = ["cli", "core", "agents", "config", "reviews", "providers", "mcp_server"]
