@@ -1,0 +1,1 @@
+"""Core ProjectOS architecture package."""

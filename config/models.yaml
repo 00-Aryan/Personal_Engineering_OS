@@ -1,0 +1,38 @@
+providers:
+  openrouter:
+    api_key_env: OPENROUTER_API_KEY
+    completion_url: https://openrouter.ai/api/v1/chat/completions
+    stream_url: https://openrouter.ai/api/v1/chat/completions
+    default_model: openrouter-free
+  gemini:
+    api_key_env: GEMINI_API_KEY
+    completion_url_template: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}
+    stream_url_template: https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?key={api_key}
+    default_model: gemini-flash
+  ollama:
+    completion_url: http://localhost:11434/api/generate
+    stream_url: http://localhost:11434/api/generate
+    default_model: ollama-fallback
+
+agents:
+  clone:
+    provider: gemini
+    model: gemini-flash
+  planning:
+    provider: openrouter
+    model: deepseek-v3
+  code_writing:
+    provider: openrouter
+    model: openrouter-free
+  code_review:
+    provider: openrouter
+    model: openrouter-free
+  architecture:
+    provider: openrouter
+    model: deepseek-v3
+  test:
+    provider: openrouter
+    model: openrouter-free
+  docs:
+    provider: gemini
+    model: gemini-flash

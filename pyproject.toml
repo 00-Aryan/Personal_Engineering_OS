@@ -1,0 +1,15 @@
+[project]
+name = "personal-engineering-os"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "click>=8.0.0",
+    "pytest>=9.0.3",
+    "pyyaml>=6.0.1",
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+projectos = "cli.main:cli"
