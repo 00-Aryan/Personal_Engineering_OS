@@ -23,4 +23,4 @@ dev = [
 projectos = "cli.main:cli"
 
 [tool.setuptools.packages.find]
-include = ["cli", "core", "agents", "providers", "mcp_server"]
+include = ["cli", "core", "agents", "config", "reviews", "providers", "mcp_server"]
