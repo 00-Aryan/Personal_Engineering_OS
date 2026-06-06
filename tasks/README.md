@@ -27,6 +27,20 @@ Never start a task without reading all existing code first.
 - TASK_18: DONE (stdio MCP server - 113 tests green)
 - TASK_19: DONE (multi-project support - 118 tests green)
 - TASK_20: DONE (open source preparation - 125 tests green)
+- TASK_21: DONE (evaluation framework + LLM judge - 138 tests green)
+- TASK_22: DONE (schema validation + regression detector - 152 tests green)
+- TASK_23: DONE (static code quality analyzer - 159 tests green)
+- TASK_24: DONE (quality gate enforcement layer - 172 tests green)
+- TASK_25: DONE (evaluation CI pipeline + quality dashboard - 182 tests green)
+- TASK_26: DONE (phase 3 integration + evaluation audit trail - 189 tests green)
+
+## Phase 4 — Agent Intelligence
+- TASK_27: PENDING
+- TASK_28: PENDING
+- TASK_29: PENDING
+- TASK_30: PENDING
+- TASK_31: PENDING
+- TASK_32: PENDING
 
 ## Audit Protocol
 After every task, TASK_XX_RESULT.md must contain:

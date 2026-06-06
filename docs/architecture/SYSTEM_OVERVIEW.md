@@ -116,3 +116,88 @@ This design keeps blocked work visible in markdown while allowing unrelated even
 All model calls go through `core/model_provider.py`. Providers load `config/models.yaml`, resolve each agent's provider and model, read API keys from configured environment variables when needed, and expose `complete()` and `stream()` methods.
 
 Implemented provider adapters are OpenRouter, Gemini, and Ollama. Tests use mocked providers so the verification suite does not require live API calls.
+
+## Phase 3 Evaluation Subsystem
+
+Phase 3 adds a quality layer that sits between worker-agent output and Clone's downstream dispatch decisions.
+
+```text
+             +-----------------------+
+             | Worker Agent Result   |
+             +-----------+-----------+
+                         |
+                         v
+             +-----------+-----------+
+             | SchemaValidator       |
+             | output shape checks   |
+             +-----------+-----------+
+                         |
+                         v
+ +-----------------------+-----------------------+
+ |                                               |
+ v                                               v
++----------------------+             +----------+-----------+
+| LLMJudge             |             | StaticAnalyzer       |
+| rubric scores        |             | code quality signals |
++----------+-----------+             +----------+-----------+
+           |                                    |
+           +----------------+-------------------+
+                            |
+                            v
+                 +----------+-----------+
+                 | QualityScorer        |
+                 | weighted score       |
+                 +----------+-----------+
+                            |
+                            v
+                 +----------+-----------+
+                 | RegressionDetector   |
+                 | model baselines      |
+                 +----------+-----------+
+                            |
+                            v
+                 +----------+-----------+
+                 | QualityGate          |
+                 | PASS/BLOCK/ESCALATE |
+                 +----------------------+
+```
+
+Persistent evaluation artifacts:
+
+- `.projectos_state/evaluations.jsonl` stores LLM judge results.
+- `.projectos_state/baselines.json` stores rolling model-versioned baselines.
+- `.projectos_state/gate_decisions.jsonl` stores append-only gate decisions and overrides.
+- `.projectos_state/static_analysis/` stores static reports emitted by the code-writing path.
+- `decisions.log` and `escalation_queue.md` remain the human-facing operational trail.
+
+## Quality Gate And Clone Dispatch
+
+`ProjectOS` initializes `EvaluationStore`, `SchemaValidator`, `RegressionDetector`, `StaticAnalyzer`, `QualityScorer`, and `QualityGate`, then injects them into `CloneAgent`.
+
+When a worker agent returns an `AgentResult`, `ProjectOS._handle_agent_result()` passes the result through `CloneAgent.process_agent_result()` before dispatching follow-up events. Clone validates result schema first. If validation fails, Clone marks the result for escalation and writes an escalation row.
+
+If a quality gate is configured, Clone then calls `QualityGate.evaluate()`. A `PASS` decision appends an autonomous gate decision to `decisions.log` and allows downstream events to continue. A `BLOCK` decision clears downstream events, marks the result as escalating, appends a gate record, and writes `escalation_queue.md`. An `ESCALATE` decision preserves downstream flow but still marks the result and writes an escalation row for human review.
+
+Human operators can append an override with `projectos gate override EVENT_ID --reason TEXT`. Overrides are stored as `BYPASS` rows in `gate_decisions.jsonl`; earlier blocked rows are never rewritten.
+
+## Evaluation Data Flow
+
+```text
+AgentResult
+  -> DEFAULT_SCHEMAS validation
+  -> LLMJudge rubric scoring
+  -> EvaluationStore.save()
+  -> StaticAnalyzer.analyze(file_path)
+  -> QualityScorer.score(llm_weight=0.6, static_weight=0.4)
+  -> RegressionDetector.check_regression(agent, score, model_version)
+  -> QualityGate.evaluate()
+  -> CloneAgent PASS/BLOCK/ESCALATE handling
+```
+
+The benchmark and smoke scripts use mocked providers and deterministic static signals so CI can verify the pipeline without live API calls.
+
+## Baseline Versioning Strategy
+
+Regression baselines are keyed by `agent_name:model_version`. Each model version receives an independent rolling score window, so changing an agent model automatically starts a fresh baseline rather than comparing the new model against the old model's distribution.
+
+`RegressionDetector` keeps the latest ten scores by default and requires at least five samples before a regression can trigger. A regression is detected when the current score falls below the baseline by more than the configured tolerance, currently ten percent by default. Baselines can be inspected with `projectos quality baseline` and reset per agent with `projectos quality reset --agent AGENT_NAME`.

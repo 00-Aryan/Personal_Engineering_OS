@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from core.base_agent import BaseAgent
+from core.evaluation.static_analyzer import StaticAnalysisReport, StaticAnalyzer
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
 from core.safety import SafetyPolicy, SafetyResult
@@ -61,18 +64,30 @@ DECISION_LOG_SUFFIX = "]\n"
 DECISION_SUCCESS = "SUCCESS"
 DECISION_FAILURE = "FAILURE"
 DECISION_DIFF_PREVIEW = "DIFF_PREVIEW"
+DECISION_WARNING = "WARNING"
 DECISION_REASON_MISSING_PAYLOAD = "code writing event missing required payload"
 DECISION_REASON_WRITTEN_TEMPLATE = "Wrote {line_count} lines to {file_path} for task {task_id}"
 DECISION_REASON_SAFETY_BLOCKED_TEMPLATE = "safety policy blocked write to {file_path}: {reason}"
 DECISION_REASON_SAFETY_WARNING_TEMPLATE = "safety policy warnings for {file_path}: {warnings}"
+DECISION_REASON_STATIC_WARNING_TEMPLATE = (
+    "static quality gate failed for {file_path}: {summary}"
+)
+DECISION_REASON_STATIC_FAILED_TEMPLATE = "static analysis failed for {file_path}: {error}"
 
 OUTPUT_KEY_ERROR = "error"
 OUTPUT_KEY_FILE_PATH = "file_path"
 OUTPUT_KEY_LINE_COUNT = "line_count"
+METADATA_KEY_STATIC_REPORT = "static_report"
 
 MARKDOWN_FENCE = "```"
 PYTHON_FENCE = "```python"
 CODE_FENCE = "```code"
+STATE_DIR_NAME = ".projectos_state"
+STATIC_REPORTS_DIR_NAME = "static_analysis"
+STATIC_REPORT_EXTENSION = ".json"
+SAFE_FILENAME_REPLACEMENT = "_"
+
+
 def _utc_timestamp() -> str:
     """Return an ISO-8601 UTC timestamp."""
     from datetime import datetime, timezone
@@ -119,11 +134,13 @@ class CodeWritingAgent(BaseAgent):
         logger: logging.Logger,
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
         safety_policy: Optional[SafetyPolicy] = None,
+        static_analyzer: Optional[StaticAnalyzer] = None,
     ) -> None:
         """Initialize CodeWritingAgent with model access and project paths."""
         super().__init__(AGENT_NAME, ROLE_DESCRIPTION, model_provider, logger)
         self.project_root = Path(project_root)
         self.safety_policy = safety_policy
+        self.static_analyzer = static_analyzer
 
     def handle(self, event: AgentEvent) -> AgentResult:
         """Write code for an incoming task event and emit CODE_WRITTEN."""
@@ -156,6 +173,17 @@ class CodeWritingAgent(BaseAgent):
             task_id=task_id,
         )
         self._log_decision(event, DECISION_SUCCESS, reasoning)
+        static_report = self._run_static_analysis(event, file_path)
+        static_report_path = self._write_static_report(event, static_report)
+        static_escalation_reason = self._static_escalation_reason(
+            event,
+            static_report,
+        )
+        if static_escalation_reason is not None:
+            escalation_reason = static_escalation_reason
+        metadata = {}
+        if static_report_path is not None:
+            metadata[METADATA_KEY_STATIC_REPORT] = str(static_report_path)
         return AgentResult(
             success=True,
             output={
@@ -165,7 +193,92 @@ class CodeWritingAgent(BaseAgent):
             next_events=[self._code_written_event(event, file_path, line_count)],
             escalate=bool(escalation_reason),
             escalation_reason=escalation_reason,
+            metadata=metadata,
         )
+
+    def _run_static_analysis(
+        self,
+        event: AgentEvent,
+        file_path: Path,
+    ) -> Optional[StaticAnalysisReport]:
+        """Analyze a written file when a static analyzer is configured."""
+        if self.static_analyzer is None:
+            return None
+        try:
+            return self.static_analyzer.analyze(file_path)
+        except Exception as error:
+            reason = DECISION_REASON_STATIC_FAILED_TEMPLATE.format(
+                file_path=str(file_path),
+                error=error,
+            )
+            self._log_decision(event, DECISION_WARNING, reason)
+            self.logger.warning(reason)
+            return None
+
+    def _write_static_report(
+        self,
+        event: AgentEvent,
+        report: Optional[StaticAnalysisReport],
+    ) -> Optional[Path]:
+        """Persist a static analysis report and return its path."""
+        if report is None:
+            return None
+        report_path = self._static_report_path(event, Path(report.file_path))
+        rendered_report = json.dumps(
+            asdict(report),
+            sort_keys=True,
+            indent=2,
+            default=str,
+        )
+        _write_atomically(report_path, f"{rendered_report}{NEWLINE}")
+        return report_path
+
+    def _static_escalation_reason(
+        self,
+        event: AgentEvent,
+        report: Optional[StaticAnalysisReport],
+    ) -> Optional[str]:
+        """Log failed static gates and return an escalation reason when needed."""
+        if report is None:
+            return None
+        if report.passed_quality_gate and report.security.high_severity_count == 0:
+            return None
+        reason = DECISION_REASON_STATIC_WARNING_TEMPLATE.format(
+            file_path=report.file_path,
+            summary=report.summary,
+        )
+        if not report.passed_quality_gate:
+            self._log_decision(event, DECISION_WARNING, reason)
+        if report.security.high_severity_count > 0:
+            return reason
+        return None
+
+    def _static_report_path(self, event: AgentEvent, file_path: Path) -> Path:
+        """Return the persisted static report path for one generated file."""
+        safe_stem = self._safe_report_stem(file_path)
+        report_name = f"{safe_stem}-{event.event_id}{STATIC_REPORT_EXTENSION}"
+        return (
+            self.project_root
+            / STATE_DIR_NAME
+            / STATIC_REPORTS_DIR_NAME
+            / report_name
+        )
+
+    def _safe_report_stem(self, file_path: Path) -> str:
+        """Return a filesystem-safe report stem for a source path."""
+        relative_path = self._relative_report_path(file_path)
+        characters = [
+            character if character.isalnum() else SAFE_FILENAME_REPLACEMENT
+            for character in str(relative_path)
+        ]
+        return EMPTY_TEXT.join(characters).strip(SAFE_FILENAME_REPLACEMENT)
+
+    def _relative_report_path(self, file_path: Path) -> Path:
+        """Return file path relative to project root when possible."""
+        try:
+            return file_path.resolve().relative_to(self.project_root.resolve())
+        except ValueError:
+            return Path(file_path.name)
 
     def _validate_safe_write(
         self,

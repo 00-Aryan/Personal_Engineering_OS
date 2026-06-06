@@ -7,6 +7,7 @@ import json
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
@@ -15,10 +16,28 @@ import yaml
 
 from cli.dashboard import Dashboard
 from core.decision_log import DecisionLogger
+from core.evaluation.audit_report import EvaluationAuditReport
+from core.evaluation.evaluation_store import EvaluationStore
+from core.evaluation.quality_gate import (
+    DEFAULT_POLICIES,
+    GATE_LOG_NAME,
+    GateDecision,
+    QualityGate,
+)
+from core.evaluation.quality_scorer import QualityScorer
+from core.evaluation.regression_detector import RegressionDetector
+from core.evaluation.static_analyzer import StaticAnalyzer
 from core.events import AgentEvent, AgentResult, EventType
 from core.project_config import ProjectConfig, ProjectRegistry
 from core.projectos import MultiProjectOS, ProjectOS
 from core.task_queue import TaskQueue
+from scripts.quality_benchmark import (
+    BenchmarkSuite,
+    HISTORY_HEADER,
+    NO_HISTORY_MESSAGE,
+    exit_code_for_report,
+    history_rows,
+)
 
 
 DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +111,49 @@ GIT_AUTHOR_FILTER = "ProjectOS"
 GIT_LOG_LIMIT = "-10"
 NO_AUTO_COMMITS_MESSAGE = "No ProjectOS auto-commits found."
 GIT_LOG_ERROR_MESSAGE = "Unable to read ProjectOS git log."
+QUALITY_EVALUATOR_NAME = "llm_judge"
+QUALITY_HEADER = "Agent          Score   Baseline  Delta   Status"
+QUALITY_BASELINE_HEADER = "Agent          Model          Baseline  Samples"
+QUALITY_NO_BASELINES = "No quality baselines found."
+QUALITY_RESET_TEMPLATE = "Reset baseline for {agent_name} ({model_version})"
+QUALITY_STATUS_NO_DATA = "No Data"
+QUALITY_STATUS_STABLE = "Stable"
+QUALITY_STATUS_REGRESSION = "Regression"
+QUALITY_MISSING_SCORE = "--"
+QUALITY_DELTA_TEMPLATE = "{delta:+.2f}"
+QUALITY_SCORE_TEMPLATE = "{score:.2f}"
+QUALITY_BASELINE_KEY_TEMPLATE = "{agent_name}:{model_version}"
+QUALITY_STABLE_RATIO = 0.90
+QUALITY_FIELD_AGENT_NAME = "agent_name"
+QUALITY_FIELD_MODEL_VERSION = "model_version"
+QUALITY_FIELD_BASELINE_SCORE = "baseline_score"
+QUALITY_FIELD_SAMPLE_SIZE = "sample_size"
+QUALITY_AGENT_WIDTH = 14
+QUALITY_SCORE_WIDTH = 7
+QUALITY_BASELINE_WIDTH = 9
+QUALITY_DELTA_WIDTH = 7
+QUALITY_MODEL_WIDTH = 14
+GATE_HEADER = "Agent          Block Rate  Last 10"
+GATE_POLICY_HEADER = "Agent          Min Score  LLM  Static  Security  Regression"
+GATE_OVERRIDE_TEMPLATE = "Bypassed gate decision for {event_id}: {reason}"
+GATE_NO_DECISIONS = "No gate decisions found."
+GATE_AGENT_WIDTH = 14
+GATE_RATE_WIDTH = 12
+GATE_SCORE_WIDTH = 11
+GATE_FLAG_WIDTH = 5
+GATE_SECURITY_WIDTH = 10
+GATE_REGRESSION_WIDTH = 10
+GATE_STATUS_PASS = "P"
+GATE_STATUS_BLOCK = "B"
+GATE_STATUS_ESCALATE = "E"
+GATE_STATUS_BYPASS = "Y"
+GATE_RATE_TEMPLATE = "{rate:.1f}%"
+GATE_SCORE_TEMPLATE = "{score:.2f}"
+GATE_TRUE = "yes"
+GATE_FALSE = "no"
+BENCHMARK_RUNNING_MESSAGE = "Running quality benchmark..."
+AUDIT_DEFAULT_DAYS = 7
+AUDIT_SAVED_TEMPLATE = "Saved audit report to {path}"
 
 class ReviewSubmissionTarget:
     """Minimal target that records manually submitted review events."""
@@ -375,6 +437,177 @@ def decisions(
         click.echo(_decision_table_row(record))
 
 
+@cli.group()
+def quality() -> None:
+    """Inspect evaluation quality scores and baselines."""
+
+
+@quality.command(name="status")
+@click.pass_context
+def quality_status(ctx: click.Context) -> None:
+    """Show per-agent quality scores and regression status."""
+    project_root = _project_root(ctx)
+    config = _load_config(project_root)
+    evaluation_store = EvaluationStore(project_root / STATE_DIR_PATH)
+    regression_detector = RegressionDetector(
+        evaluation_store,
+        project_root / STATE_DIR_PATH,
+    )
+    baselines = regression_detector.get_all_baselines()
+    click.echo(QUALITY_HEADER)
+    for agent_name, agent_config in _agent_configs(config).items():
+        model_version = str(agent_config.get(CONFIG_KEY_MODEL, MISSING_VALUE))
+        score = evaluation_store.get_agent_average_score(
+            agent_name,
+            QUALITY_EVALUATOR_NAME,
+        )
+        baseline = _quality_baseline(baselines, agent_name, model_version)
+        click.echo(_quality_status_row(agent_name, score, baseline))
+
+
+@quality.command(name="baseline")
+@click.pass_context
+def quality_baseline(ctx: click.Context) -> None:
+    """Show stored quality baselines with sample sizes."""
+    project_root = _project_root(ctx)
+    evaluation_store = EvaluationStore(project_root / STATE_DIR_PATH)
+    regression_detector = RegressionDetector(
+        evaluation_store,
+        project_root / STATE_DIR_PATH,
+    )
+    baselines = regression_detector.get_all_baselines()
+    if not baselines:
+        click.echo(QUALITY_NO_BASELINES)
+        return
+    click.echo(QUALITY_BASELINE_HEADER)
+    for record in baselines.values():
+        click.echo(_quality_baseline_row(record))
+
+
+@quality.command(name="reset")
+@click.option("--agent", "agent_name", required=True)
+@click.pass_context
+def quality_reset(ctx: click.Context, agent_name: str) -> None:
+    """Reset the baseline for one configured agent."""
+    project_root = _project_root(ctx)
+    config = _load_config(project_root)
+    agent_configs = _agent_configs(config)
+    if agent_name not in agent_configs:
+        raise click.ClickException(f"Unknown agent: {agent_name}")
+    model_version = str(agent_configs[agent_name].get(CONFIG_KEY_MODEL, MISSING_VALUE))
+    evaluation_store = EvaluationStore(project_root / STATE_DIR_PATH)
+    regression_detector = RegressionDetector(
+        evaluation_store,
+        project_root / STATE_DIR_PATH,
+    )
+    regression_detector.reset_baseline(agent_name, model_version)
+    click.echo(
+        QUALITY_RESET_TEMPLATE.format(
+            agent_name=agent_name,
+            model_version=model_version,
+        )
+    )
+
+
+@cli.group()
+def gate() -> None:
+    """Inspect and override quality gate decisions."""
+
+
+@gate.command(name="status")
+@click.pass_context
+def gate_status(ctx: click.Context) -> None:
+    """Show block rates and recent gate decisions by agent."""
+    quality_gate = _quality_gate(ctx)
+    agent_names = _gate_agent_names(quality_gate)
+    if not agent_names:
+        click.echo(GATE_NO_DECISIONS)
+        return
+    click.echo(GATE_HEADER)
+    for agent_name in agent_names:
+        click.echo(_gate_status_row(quality_gate, agent_name))
+
+
+@gate.command(name="override")
+@click.argument("event_id")
+@click.option("--reason", required=True)
+@click.pass_context
+def gate_override(ctx: click.Context, event_id: str, reason: str) -> None:
+    """Mark a blocked quality gate decision as human-overridden."""
+    quality_gate = _quality_gate(ctx)
+    try:
+        result = quality_gate.override(event_id, reason)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(
+        GATE_OVERRIDE_TEMPLATE.format(
+            event_id=result.event_id,
+            reason=result.override_reason,
+        )
+    )
+
+
+@gate.command(name="policies")
+@click.pass_context
+def gate_policies(ctx: click.Context) -> None:
+    """Show configured quality gate policies."""
+    quality_gate = _quality_gate(ctx)
+    click.echo(GATE_POLICY_HEADER)
+    for policy in quality_gate.policies.values():
+        click.echo(_gate_policy_row(policy))
+
+
+@cli.group()
+def benchmark() -> None:
+    """Run and inspect ProjectOS quality benchmarks."""
+
+
+@benchmark.command(name="run")
+@click.pass_context
+def benchmark_run(ctx: click.Context) -> None:
+    """Run the mocked quality benchmark suite."""
+    project_root = _project_root(ctx)
+    click.echo(BENCHMARK_RUNNING_MESSAGE)
+    report = BenchmarkSuite(project_root).run_all(use_mocks=True)
+    click.echo(report.to_markdown())
+    raise click.exceptions.Exit(exit_code_for_report(report))
+
+
+@benchmark.command(name="history")
+@click.pass_context
+def benchmark_history(ctx: click.Context) -> None:
+    """Show the last ten quality benchmark runs."""
+    rows = history_rows(_project_root(ctx), limit=10)
+    if not rows:
+        click.echo(NO_HISTORY_MESSAGE)
+        return
+    click.echo(HISTORY_HEADER)
+    for row in rows:
+        click.echo(row)
+
+
+@cli.command(name="audit")
+@click.option("--days", type=int, default=AUDIT_DEFAULT_DAYS, show_default=True)
+@click.option("--save", "save_path", type=click.Path(path_type=Path), default=None)
+@click.option("--agent", "agent_name", default=None)
+@click.pass_context
+def audit(ctx: click.Context, days: int, save_path: Optional[Path], agent_name: Optional[str]) -> None:
+    """Generate a human-readable quality audit report."""
+    project_root = _project_root(ctx)
+    since = datetime.now(timezone.utc) - timedelta(days=max(days, 0))
+    report = EvaluationAuditReport(
+        EvaluationStore(project_root / STATE_DIR_PATH),
+        project_root / STATE_DIR_PATH / GATE_LOG_NAME,
+        project_root / DECISIONS_LOG_PATH,
+    ).generate(since, agent_filter=agent_name)
+    if save_path is not None:
+        resolved_path = save_path if save_path.is_absolute() else project_root / save_path
+        _write_atomically(resolved_path, report)
+        click.echo(AUDIT_SAVED_TEMPLATE.format(path=resolved_path))
+        return
+    _echo_markdown(report)
+
+
 def _project_root(ctx: click.Context) -> Path:
     """Return the active project root from Click context."""
     value = ctx.obj.get("project_root") if ctx.obj else None
@@ -393,6 +626,24 @@ def _review_target_agent(ctx: click.Context) -> Any:
     if ctx.obj is not None and "review_target_agent" in ctx.obj:
         return ctx.obj["review_target_agent"]
     return ReviewSubmissionTarget()
+
+
+def _quality_gate(ctx: click.Context) -> QualityGate:
+    """Return a quality gate from context or local project state."""
+    if ctx.obj is not None and "quality_gate" in ctx.obj:
+        return ctx.obj["quality_gate"]
+    project_root = _project_root(ctx)
+    state_dir = project_root / STATE_DIR_PATH
+    evaluation_store = EvaluationStore(state_dir)
+    static_analyzer = StaticAnalyzer()
+    quality_scorer = QualityScorer(static_analyzer, evaluation_store)
+    regression_detector = RegressionDetector(evaluation_store, state_dir)
+    return QualityGate(
+        DEFAULT_POLICIES,
+        quality_scorer,
+        regression_detector,
+        state_dir / GATE_LOG_NAME,
+    )
 
 
 def _run_all_projects() -> None:
@@ -553,6 +804,160 @@ def _decision_table_row(record: Mapping[str, Any]) -> str:
             str(record.get("reasoning", MISSING_VALUE)).replace(NEWLINE, " "),
         ]
     )
+
+
+def _quality_baseline(
+    baselines: Mapping[str, Mapping[str, Any]],
+    agent_name: str,
+    model_version: str,
+) -> Optional[float]:
+    """Return a baseline score for one agent and model version."""
+    baseline_key = QUALITY_BASELINE_KEY_TEMPLATE.format(
+        agent_name=agent_name,
+        model_version=model_version,
+    )
+    record = baselines.get(baseline_key)
+    if not isinstance(record, Mapping):
+        return None
+    value = record.get(QUALITY_FIELD_BASELINE_SCORE)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _quality_status_row(
+    agent_name: str,
+    score: Optional[float],
+    baseline: Optional[float],
+) -> str:
+    """Return one quality status table row."""
+    score_text = _quality_score_text(score)
+    baseline_text = _quality_score_text(baseline)
+    delta_text = _quality_delta_text(score, baseline)
+    status_text = _quality_status_text(score, baseline)
+    return (
+        f"{agent_name:<{QUALITY_AGENT_WIDTH}}"
+        f"{score_text:<{QUALITY_SCORE_WIDTH}}"
+        f"{baseline_text:<{QUALITY_BASELINE_WIDTH}}"
+        f"{delta_text:<{QUALITY_DELTA_WIDTH}}"
+        f"{status_text}"
+    )
+
+
+def _quality_baseline_row(record: Mapping[str, Any]) -> str:
+    """Return one quality baseline table row."""
+    agent_name = str(record.get(QUALITY_FIELD_AGENT_NAME, MISSING_VALUE))
+    model_version = str(record.get(QUALITY_FIELD_MODEL_VERSION, MISSING_VALUE))
+    baseline_score = _quality_score_text(
+        _float_or_none(record.get(QUALITY_FIELD_BASELINE_SCORE))
+    )
+    sample_size = str(record.get(QUALITY_FIELD_SAMPLE_SIZE, 0))
+    return (
+        f"{agent_name:<{QUALITY_AGENT_WIDTH}}"
+        f"{model_version:<{QUALITY_MODEL_WIDTH}}"
+        f"{baseline_score:<{QUALITY_BASELINE_WIDTH}}"
+        f"{sample_size}"
+    )
+
+
+def _quality_score_text(score: Optional[float]) -> str:
+    """Return display text for an optional quality score."""
+    if score is None:
+        return QUALITY_MISSING_SCORE
+    return QUALITY_SCORE_TEMPLATE.format(score=score)
+
+
+def _quality_delta_text(
+    score: Optional[float],
+    baseline: Optional[float],
+) -> str:
+    """Return display text for a quality score delta."""
+    if score is None or baseline is None:
+        return QUALITY_MISSING_SCORE
+    return QUALITY_DELTA_TEMPLATE.format(delta=score - baseline)
+
+
+def _quality_status_text(
+    score: Optional[float],
+    baseline: Optional[float],
+) -> str:
+    """Return quality status text for score and baseline."""
+    if score is None or baseline is None:
+        return QUALITY_STATUS_NO_DATA
+    if score < baseline * QUALITY_STABLE_RATIO:
+        return QUALITY_STATUS_REGRESSION
+    return QUALITY_STATUS_STABLE
+
+
+def _gate_agent_names(quality_gate: QualityGate) -> list[str]:
+    """Return agent names with policies or gate records."""
+    names = {
+        agent_name
+        for agent_name in quality_gate.policies
+        if agent_name != "default"
+    }
+    names.update(result.agent_name for result in quality_gate.recent_results(limit=100))
+    return sorted(names)
+
+
+def _gate_status_row(quality_gate: QualityGate, agent_name: str) -> str:
+    """Return one quality gate status table row."""
+    block_rate = quality_gate.get_block_rate(agent_name) * 100.0
+    recent_results = quality_gate.recent_results(agent_name, 10)
+    status_text = " ".join(_gate_status_symbol(result.decision) for result in recent_results)
+    return (
+        f"{agent_name:<{GATE_AGENT_WIDTH}}"
+        f"{GATE_RATE_TEMPLATE.format(rate=block_rate):<{GATE_RATE_WIDTH}}"
+        f"{status_text}"
+    )
+
+
+def _gate_status_symbol(decision: GateDecision) -> str:
+    """Return a compact symbol for one gate decision."""
+    if decision is GateDecision.PASS:
+        return GATE_STATUS_PASS
+    if decision is GateDecision.BLOCK:
+        return GATE_STATUS_BLOCK
+    if decision is GateDecision.ESCALATE:
+        return GATE_STATUS_ESCALATE
+    return GATE_STATUS_BYPASS
+
+
+def _gate_policy_row(policy: Any) -> str:
+    """Return one quality gate policy table row."""
+    return (
+        f"{policy.agent_name:<{GATE_AGENT_WIDTH}}"
+        f"{GATE_SCORE_TEMPLATE.format(score=policy.min_combined_score):<{GATE_SCORE_WIDTH}}"
+        f"{_flag_text(policy.require_llm_evaluation):<{GATE_FLAG_WIDTH}}"
+        f"{_flag_text(policy.require_static_analysis):<{GATE_FLAG_WIDTH + 3}}"
+        f"{_flag_text(policy.block_on_security_high):<{GATE_SECURITY_WIDTH}}"
+        f"{_flag_text(policy.block_on_regression):<{GATE_REGRESSION_WIDTH}}"
+    )
+
+
+def _flag_text(value: bool) -> str:
+    """Return display text for a boolean flag."""
+    return GATE_TRUE if value else GATE_FALSE
+
+
+def _echo_markdown(markdown_text: str) -> None:
+    """Print markdown with Rich formatting when available."""
+    try:
+        from rich.console import Console
+        from rich.markdown import Markdown
+    except ImportError:
+        click.echo(markdown_text)
+        return
+    Console().print(Markdown(markdown_text))
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    """Return a float value or None on conversion failure."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _updated_escalation_lines(lines: Iterable[str]) -> list[str]:

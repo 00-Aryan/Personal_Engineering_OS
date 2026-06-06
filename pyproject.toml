@@ -37,5 +37,6 @@ include = [
     "reviews*",
     "providers*",
     "mcp_server*",
+    "scripts*",
 ]
 namespaces = true

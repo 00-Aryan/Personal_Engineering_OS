@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 
 class EventType(Enum):
@@ -58,3 +58,4 @@ class AgentResult:
     next_events: List[AgentEvent] = field(default_factory=list)
     escalate: bool = False
     escalation_reason: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)

@@ -13,6 +13,11 @@ from typing import Any, Iterable, List, Mapping, Optional, Sequence
 
 from core.base_agent import BaseAgent
 from core.decision_log import DecisionLogger
+from core.evaluation.base_evaluator import EvaluationResult
+from core.evaluation.evaluation_store import EvaluationStore
+from core.evaluation.quality_gate import GateDecision, QualityGate
+from core.evaluation.regression_detector import RegressionDetector
+from core.evaluation.schema_validator import SchemaValidator, ValidationResult
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
 
@@ -49,6 +54,7 @@ PAYLOAD_KEY_AGENT_RESULT = "agent_result"
 PAYLOAD_KEY_CATEGORY = "category"
 PAYLOAD_KEY_DECISION_CATEGORY = "decision_category"
 PAYLOAD_KEY_ESCALATE = "escalate"
+PAYLOAD_KEY_FILE_PATH = "file_path"
 PAYLOAD_KEY_KIND = "kind"
 PAYLOAD_KEY_ORIGINAL_EVENT_ID = "original_event_id"
 PAYLOAD_KEY_PERMISSION_RESUMED = "permission_resumed"
@@ -97,6 +103,15 @@ DECISION_REASON_ROUTINE_EVENT = "routine event can be handled autonomously"
 DECISION_REASON_ROUTINE_PAYLOAD = "payload contains routine work marker"
 DECISION_REASON_DEFAULT_AUTONOMOUS = "no escalation or dependency signal detected"
 DECISION_REASON_PERMISSION_GRANTED = "permission grant resumes blocked work"
+DECISION_REASON_SCHEMA_VALIDATION_FAILED = "schema_validation_failed"
+DECISION_REASON_SCHEMA_WARNING_TEMPLATE = (
+    "schema validation failed for {agent_name}: missing={missing_fields}; "
+    "type_errors={type_errors}"
+)
+DECISION_REASON_GATE_TEMPLATE = "quality_gate {decision}: {reasons}"
+DECISION_REASON_GATE_PASS = "quality_gate PASS"
+DECISION_REASON_GATE_BLOCK = "quality_gate BLOCK"
+DECISION_REASON_GATE_ESCALATE = "quality_gate ESCALATE"
 
 LOG_STATUS_PENDING = "PENDING"
 LOG_TABLE_SEPARATOR = " | "
@@ -216,6 +231,10 @@ class CloneAgent(BaseAgent):
         queued_events: Optional[Iterable[AgentEvent]] = None,
         agent_registry: Optional[Any] = None,
         task_queue: Optional[Any] = None,
+        schema_validator: Optional[SchemaValidator] = None,
+        regression_detector: Optional[RegressionDetector] = None,
+        evaluation_store: Optional[EvaluationStore] = None,
+        quality_gate: Optional[QualityGate] = None,
     ) -> None:
         """Initialize CloneAgent state and required project log files."""
         super().__init__(AGENT_NAME, ROLE_DESCRIPTION, model_provider, logger)
@@ -224,6 +243,10 @@ class CloneAgent(BaseAgent):
         self.blocked_events: List[AgentEvent] = []
         self.agent_registry = agent_registry
         self.task_queue = task_queue
+        self.schema_validator = schema_validator
+        self.regression_detector = regression_detector
+        self.evaluation_store = evaluation_store
+        self.quality_gate = quality_gate
         self.decision_logger = DecisionLogger(self.project_root)
         self._ensure_project_files()
 
@@ -345,6 +368,80 @@ class CloneAgent(BaseAgent):
             success=True,
             output=self._result_output(decision_category, reasoning),
             next_events=next_events,
+        )
+
+    def process_agent_result(
+        self,
+        result: AgentResult,
+        agent_name: Optional[str] = None,
+        event_id: Optional[str] = None,
+    ) -> AgentResult:
+        """Apply optional evaluator hooks to a worker AgentResult."""
+        if not isinstance(result.output, dict):
+            return result
+        resolved_agent_name = agent_name or self._agent_name_for_result(result)
+        resolved_event_id = event_id or self._event_id_for_result(result)
+        if (
+            self.schema_validator is not None
+            and self.schema_validator.has_schema(resolved_agent_name)
+        ):
+            validation = self.schema_validator.validate(
+                resolved_agent_name,
+                result.output,
+            )
+            if not validation.valid:
+                self._handle_schema_validation_failure(
+                    result,
+                    resolved_agent_name,
+                    resolved_event_id,
+                    validation,
+                )
+        if self.quality_gate is None:
+            return result
+        self._apply_quality_gate(
+            result,
+            resolved_agent_name,
+            resolved_event_id,
+        )
+        return result
+
+    def _apply_quality_gate(
+        self,
+        result: AgentResult,
+        agent_name: str,
+        event_id: str,
+    ) -> None:
+        """Evaluate and apply quality gate decisions to an agent result."""
+        if self.quality_gate is None:
+            return
+        gate_result = self.quality_gate.evaluate(
+            result,
+            agent_name,
+            llm_evaluation=self._llm_evaluation(result),
+            file_path=self._result_file_path(result),
+            model_version=self._model_version(result),
+        )
+        gate_event = AgentEvent(
+            event_type=EventType.MANUAL_TRIGGER,
+            source_agent=agent_name,
+            payload={},
+            event_id=event_id,
+        )
+        if gate_result.decision is GateDecision.BLOCK:
+            result.next_events = []
+            result.escalate = True
+            result.escalation_reason = DECISION_REASON_GATE_BLOCK
+            self.escalate(gate_event, self._gate_reason(gate_result))
+            return
+        if gate_result.decision is GateDecision.ESCALATE:
+            result.escalate = True
+            result.escalation_reason = DECISION_REASON_GATE_ESCALATE
+            self.escalate(gate_event, self._gate_reason(gate_result))
+            return
+        self._log_decision(
+            gate_event,
+            DecisionCategory.AUTONOMOUS,
+            DECISION_REASON_GATE_PASS,
         )
 
     @property
@@ -568,6 +665,79 @@ class CloneAgent(BaseAgent):
                 PAYLOAD_KEY_PERMISSION_RESUMED: resumed,
             },
         )
+
+    def _handle_schema_validation_failure(
+        self,
+        result: AgentResult,
+        agent_name: str,
+        event_id: str,
+        validation: ValidationResult,
+    ) -> None:
+        """Flag a result and append schema validation failure escalation."""
+        result.escalate = True
+        result.escalation_reason = DECISION_REASON_SCHEMA_VALIDATION_FAILED
+        warning = DECISION_REASON_SCHEMA_WARNING_TEMPLATE.format(
+            agent_name=agent_name,
+            missing_fields=validation.missing_fields,
+            type_errors=validation.type_errors,
+        )
+        self.logger.warning(warning)
+        validation_event = AgentEvent(
+            event_type=EventType.MANUAL_TRIGGER,
+            source_agent=agent_name,
+            payload={},
+            event_id=event_id,
+        )
+        self.escalate(validation_event, DECISION_REASON_SCHEMA_VALIDATION_FAILED)
+
+    def _llm_evaluation(self, result: AgentResult) -> Optional[EvaluationResult]:
+        """Return an attached LLM evaluation when present."""
+        value = result.metadata.get("llm_evaluation")
+        if isinstance(value, EvaluationResult):
+            return value
+        return None
+
+    def _result_file_path(self, result: AgentResult) -> Optional[Path]:
+        """Return a file path from result output or emitted event payload."""
+        output_file_path = result.output.get(PAYLOAD_KEY_FILE_PATH)
+        if isinstance(output_file_path, str) and output_file_path:
+            return Path(output_file_path)
+        for next_event in result.next_events:
+            next_file_path = next_event.payload.get(PAYLOAD_KEY_FILE_PATH)
+            if isinstance(next_file_path, str) and next_file_path:
+                return Path(next_file_path)
+        return None
+
+    def _model_version(self, result: AgentResult) -> Optional[str]:
+        """Return an attached model version for regression checks."""
+        value = result.metadata.get("model_version")
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def _gate_reason(self, gate_result: Any) -> str:
+        """Return a compact quality gate reason for decisions.log."""
+        reasons = gate_result.blocking_reasons or gate_result.warnings
+        rendered_reasons = ", ".join(reasons) if reasons else gate_result.decision.value
+        return DECISION_REASON_GATE_TEMPLATE.format(
+            decision=gate_result.decision.value,
+            reasons=rendered_reasons,
+        )
+
+    def _agent_name_for_result(self, result: AgentResult) -> str:
+        """Infer the producing agent from result events when possible."""
+        if result.next_events:
+            source_agent = result.next_events[0].source_agent
+            if isinstance(source_agent, str) and source_agent:
+                return source_agent
+        return EMPTY_TEXT
+
+    def _event_id_for_result(self, result: AgentResult) -> str:
+        """Infer an event identifier from result events when possible."""
+        if result.next_events:
+            next_event = result.next_events[0]
+            return next_event.correlation_id or next_event.event_id
+        return DECISION_REASON_SCHEMA_VALIDATION_FAILED
 
     def _correlation_id(self, event: AgentEvent) -> str:
         """Return an event correlation identifier, falling back to event ID."""

@@ -24,6 +24,8 @@ AUTONOMOUS_CATEGORY = "AUTONOMOUS"
 ESCALATE_CATEGORY = "ESCALATE"
 OUTCOME = "outcome"
 REASONING = "reasoning"
+QUALITY_SCORE = 0.91
+QUALITY_BLOCK_RATE = 0.25
 
 
 class FakeTaskQueue:
@@ -46,6 +48,42 @@ class FakeHealthMonitor:
         return {
             GEMINI_PROVIDER: True,
             OLLAMA_PROVIDER: False,
+        }
+
+
+class FakeEvaluationStore:
+    """EvaluationStore test double for dashboard quality metrics."""
+
+    def get_agent_average_score(
+        self,
+        agent_name: str,
+        evaluator_name: str,
+        window: int = 20,
+    ) -> float | None:
+        """Return a fixed score for the clone agent."""
+        return QUALITY_SCORE if agent_name == CLONE_AGENT else None
+
+
+class FakeQualityGate:
+    """QualityGate test double for dashboard quality metrics."""
+
+    def get_block_rate(self, agent_name: str, window: int = 100) -> float:
+        """Return a fixed block rate for the clone agent."""
+        return QUALITY_BLOCK_RATE if agent_name == CLONE_AGENT else 0.0
+
+
+class FakeRegressionDetector:
+    """RegressionDetector test double for dashboard quality metrics."""
+
+    def get_all_baselines(self) -> dict[str, dict[str, object]]:
+        """Return one clone baseline."""
+        return {
+            "clone:model": {
+                "agent_name": CLONE_AGENT,
+                "model_version": "model",
+                "baseline_score": 0.9,
+                "sample_size": 5,
+            }
         }
 
 
@@ -114,6 +152,25 @@ class DashboardTestCase(unittest.TestCase):
         self.assertFalse(data.providers[1].healthy)
         self.assertEqual(len(data.recent_decisions), 2)
         self.assertEqual(data.recent_decisions[-1].decision_category, ESCALATE_CATEGORY)
+
+    def test_layout_data_includes_quality_metrics(self) -> None:
+        """Verify dashboard quality rows come from evaluation components."""
+        dashboard = Dashboard(
+            task_queue=FakeTaskQueue(),
+            decision_logger=self.decision_logger,
+            persistence_manager=self.persistence_manager,
+            health_monitor=FakeHealthMonitor(),
+            evaluation_store=FakeEvaluationStore(),
+            quality_gate=FakeQualityGate(),
+            regression_detector=FakeRegressionDetector(),
+        )
+
+        data = dashboard.layout_data()
+
+        self.assertEqual(data.quality[0].agent_name, CLONE_AGENT)
+        self.assertEqual(data.quality[0].avg_score, QUALITY_SCORE)
+        self.assertEqual(data.quality[0].block_rate, QUALITY_BLOCK_RATE)
+        self.assertEqual(data.quality[0].baseline_count, 1)
 
 
 if __name__ == "__main__":

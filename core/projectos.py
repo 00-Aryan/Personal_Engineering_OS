@@ -20,6 +20,19 @@ from agents.planning_agent import PlanningAgent
 from agents.test_agent import TestAgent
 from core.agent_registry import AgentRegistry
 from core.clone_agent import CloneAgent
+from core.evaluation.criteria_library import (
+    code_review_criteria,
+    code_writing_criteria,
+    documentation_criteria,
+    planning_criteria,
+)
+from core.evaluation.evaluation_store import EvaluationStore
+from core.evaluation.llm_judge import LLMJudge
+from core.evaluation.quality_gate import DEFAULT_POLICIES, GATE_LOG_NAME, QualityGate
+from core.evaluation.quality_scorer import QualityScorer
+from core.evaluation.regression_detector import RegressionDetector
+from core.evaluation.schema_validator import DEFAULT_SCHEMAS, SchemaValidator
+from core.evaluation.static_analyzer import StaticAnalyzer
 from core.events import AgentEvent, AgentResult
 from core.git_manager import GitManager
 from core.model_provider import GeminiProvider, OllamaProvider, OpenRouterProvider
@@ -43,6 +56,7 @@ TEMP_PREFIX = "."
 TEMP_SUFFIX = ".tmp"
 
 CONFIG_KEY_AGENTS = "agents"
+CONFIG_KEY_MODEL = "model"
 CONFIG_KEY_PROVIDER = "provider"
 
 AGENT_CLONE = "clone"
@@ -161,6 +175,24 @@ class ProjectOS:
         self.stop_event = threading.Event()
         self.safety_policy = DefaultSafetyPolicy(self.project_root)
         self.persistence_manager = PersistenceManager(self.state_dir)
+        self.evaluation_store = EvaluationStore(self.state_dir)
+        self.static_analyzer = StaticAnalyzer()
+        self.quality_scorer = QualityScorer(
+            self.static_analyzer,
+            self.evaluation_store,
+        )
+        self.schema_validator = SchemaValidator(DEFAULT_SCHEMAS)
+        self.regression_detector = RegressionDetector(
+            self.evaluation_store,
+            self.state_dir,
+        )
+        self.quality_gate = QualityGate(
+            DEFAULT_POLICIES,
+            self.quality_scorer,
+            self.regression_detector,
+            self.state_dir / GATE_LOG_NAME,
+        )
+        self.quality_evaluators = self._initialize_quality_evaluators()
         self.task_queue = TaskQueue(
             max_workers=TASK_QUEUE_WORKERS,
             result_callback=self._handle_agent_result,
@@ -236,6 +268,7 @@ class ProjectOS:
 
     def _handle_agent_result(self, result: AgentResult) -> None:
         """Route agent next_events back through Clone."""
+        self.clone_agent.process_agent_result(result)
         for next_event in result.next_events:
             self.clone_agent.handle(next_event)
 
@@ -305,6 +338,7 @@ class ProjectOS:
                 logger,
                 project_root=self.project_root,
                 safety_policy=self.safety_policy,
+                static_analyzer=self.static_analyzer,
             ),
             AGENT_CODE_REVIEW: CodeReviewAgent(
                 self.providers[AGENT_CODE_REVIEW],
@@ -337,9 +371,36 @@ class ProjectOS:
             project_root=self.project_root,
             agent_registry=self.agent_registry,
             task_queue=self.task_queue,
+            schema_validator=self.schema_validator,
+            regression_detector=self.regression_detector,
+            evaluation_store=self.evaluation_store,
+            quality_gate=self.quality_gate,
         )
         self._register_agent_with_alias(AGENT_CLONE, clone_agent)
         return clone_agent
+
+    def _initialize_quality_evaluators(self) -> dict[str, LLMJudge]:
+        """Initialize LLM judges using configured non-identical providers."""
+        criteria_by_agent = {
+            AGENT_CODE_WRITING: code_writing_criteria(),
+            AGENT_CODE_REVIEW: code_review_criteria(),
+            AGENT_PLANNING: planning_criteria(),
+            AGENT_DOCS: documentation_criteria(),
+        }
+        return {
+            agent_name: LLMJudge(self._judge_provider_for_agent(agent_name), criteria)
+            for agent_name, criteria in criteria_by_agent.items()
+        }
+
+    def _judge_provider_for_agent(self, agent_name: str) -> Any:
+        """Return a judge provider different from the evaluated agent when possible."""
+        agent_provider_name = self._agent_provider_name(agent_name)
+        for candidate_name, provider in self.providers.items():
+            if candidate_name == agent_name:
+                continue
+            if self._agent_provider_name(candidate_name) != agent_provider_name:
+                return provider
+        return self.providers[AGENT_CLONE]
 
     def _register_agent_with_alias(self, name: str, agent_instance: Any) -> None:
         """Register an agent by canonical name and legacy alias."""
@@ -362,6 +423,10 @@ class ProjectOS:
             if isinstance(provider_name, str) and provider_name not in health_targets:
                 health_targets[provider_name] = provider
         return health_targets
+
+    def _agent_provider_name(self, agent_name: str) -> str:
+        """Return the provider key configured for one agent."""
+        return str(self._agent_config(agent_name).get(CONFIG_KEY_PROVIDER))
 
     def _initialize_git_manager(self) -> Optional[GitManager]:
         """Return a GitManager only when the project root is a git repository."""

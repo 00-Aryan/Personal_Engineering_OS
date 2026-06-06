@@ -51,6 +51,35 @@ ProjectOS will not become an unbounded autonomous product in version 1. It is sc
        +------------------+
 ```
 
+## Phase 3: Evaluation & Quality
+
+ProjectOS now has an evaluation subsystem that scores agent outputs before downstream work continues. Agent results can be schema-validated, judged by a configured LLM evaluator, checked with deterministic static analysis, compared against rolling regression baselines, and enforced through an append-only quality gate with human override support.
+
+```text
+Agent Output -> Schema Validation -> LLM Judge -> Static Analysis
+                                                   |
+                                                   v
+                         File Written <- Quality Gate (PASS/BLOCK)
+```
+
+View current quality metrics:
+
+```bash
+uv run projectos quality status
+```
+
+Run the mocked benchmark suite:
+
+```bash
+uv run projectos benchmark run
+```
+
+Generate a quality audit report:
+
+```bash
+uv run projectos audit --days 7
+```
+
 ## Agent Roster
 
 | Name | Role | Trigger | Model |
@@ -112,6 +141,14 @@ UV_CACHE_DIR=/tmp/uv-cache PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest
 | `projectos backlog` | Prints `backlog.md` with priority coloring. |
 | `projectos review FILE_PATH` | Submits a manual `CODE_CHANGED` event for one file. |
 | `projectos run` | Starts the trigger system and background ProjectOS event loop until interrupted. |
+| `projectos quality status` | Shows per-agent evaluation scores and regression state. |
+| `projectos quality baseline` | Lists stored model-versioned quality baselines. |
+| `projectos gate status` | Shows quality gate block rates and recent decisions. |
+| `projectos gate override EVENT_ID --reason TEXT` | Appends a human BYPASS decision for a blocked gate result. |
+| `projectos benchmark run` | Runs the mocked quality benchmark suite and writes benchmark history. |
+| `projectos benchmark history` | Prints the last ten benchmark runs. |
+| `projectos audit --days N` | Prints a human-readable quality audit report. |
+| `projectos audit --save report.md` | Writes a quality audit report to a markdown file. |
 
 ## Use as MCP Server
 
@@ -164,6 +201,21 @@ agents:
 ```
 
 No agent should hardcode model names. Change models through `config/models.yaml` or `projectos model`.
+
+## Gate Policy Reference
+
+Quality gate defaults live in `core/evaluation/quality_gate.py` as `DEFAULT_POLICIES`.
+
+| Policy field | Meaning |
+| --- | --- |
+| `agent_name` | Agent or fallback policy name. |
+| `min_combined_score` | Minimum weighted score required to pass when quality signals are present. |
+| `require_llm_evaluation` | Adds a warning when no LLM judge score is attached. |
+| `require_static_analysis` | Adds a warning when no static report is available. |
+| `block_on_security_high` | Blocks when static analysis reports high-severity security issues. |
+| `block_on_regression` | Escalates when the current score drops below the model-versioned baseline tolerance. |
+| `regression_tolerance` | Allowed score drop before regression handling applies. |
+| `escalate_on_block` | Indicates blocked work should be surfaced for human review. |
 
 ## Known Limitations
 

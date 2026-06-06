@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from core.decision_log import DecisionLogger
+from core.evaluation.evaluation_store import EvaluationStore
+from core.evaluation.quality_gate import DEFAULT_POLICIES, GATE_LOG_NAME, QualityGate
+from core.evaluation.quality_scorer import QualityScorer
+from core.evaluation.regression_detector import RegressionDetector
+from core.evaluation.static_analyzer import StaticAnalyzer
 from core.persistence import PersistenceManager
 from core.provider_health import ProviderHealthMonitor
 from core.task_queue import TaskQueue
@@ -49,6 +54,7 @@ AGENT_NAMES = (
 TITLE_PROJECTOS_DASHBOARD = "ProjectOS Dashboard"
 TITLE_AGENTS = "Agents"
 TITLE_PROVIDERS = "Providers"
+TITLE_QUALITY = "Quality"
 TITLE_QUEUE = "Queue"
 TITLE_RECENT_DECISIONS = "Recent Decisions (last 5)"
 
@@ -57,6 +63,7 @@ LAYOUT_HEADER = "header"
 LAYOUT_BODY = "body"
 LAYOUT_AGENTS = "agents"
 LAYOUT_PROVIDERS = "providers"
+LAYOUT_QUALITY = "quality"
 LAYOUT_QUEUE = "queue"
 LAYOUT_DECISIONS = "decisions"
 
@@ -64,6 +71,9 @@ COLUMN_AGENT = "Agent"
 COLUMN_STATUS = "Status"
 COLUMN_PROVIDER = "Provider"
 COLUMN_HEALTH = "Health"
+COLUMN_SCORE = "Score"
+COLUMN_BLOCK_RATE = "Block"
+COLUMN_BASELINES = "Baselines"
 COLUMN_TIME = "Time"
 COLUMN_CATEGORY = "Category"
 COLUMN_OUTCOME = "Outcome"
@@ -86,6 +96,7 @@ TEXT_QUEUE_TEMPLATE = (
 )
 TEXT_PROVIDER_TEMPLATE = "{icon} {status}"
 TEXT_DECISION_TEMPLATE = "{time} {agent} {category} {outcome}"
+TEXT_QUALITY_TEMPLATE = "{agent} score={score} block={block_rate} baselines={baselines}"
 ENCODING = "utf-8"
 
 SECONDS_PER_HOUR = 3600
@@ -94,6 +105,11 @@ DECISION_LIMIT = 5
 SUMMARY_DECISION_LIMIT = 1000
 MIN_REFRESH_PER_SECOND = 1
 TIMESTAMP_TIME_LENGTH = 8
+QUALITY_EVALUATOR_NAME = "llm_judge"
+QUALITY_SCORE_MISSING = "--"
+QUALITY_SCORE_TEMPLATE = "{score:.2f}"
+QUALITY_BLOCK_RATE_TEMPLATE = "{block_rate:.1f}%"
+QUALITY_GATE_WINDOW = 100
 
 
 @dataclass(frozen=True)
@@ -133,6 +149,16 @@ class DecisionRow:
 
 
 @dataclass(frozen=True)
+class QualityRow:
+    """One quality metrics row for an agent."""
+
+    agent_name: str
+    avg_score: Optional[float]
+    block_rate: float
+    baseline_count: int
+
+
+@dataclass(frozen=True)
 class DashboardData:
     """Complete dashboard snapshot for rendering and tests."""
 
@@ -140,6 +166,7 @@ class DashboardData:
     uptime: str
     agents: tuple[AgentStatus, ...]
     providers: tuple[ProviderStatus, ...]
+    quality: tuple[QualityRow, ...]
     queue: QueueSummary
     recent_decisions: tuple[DecisionRow, ...]
 
@@ -154,6 +181,9 @@ class Dashboard:
         persistence_manager: PersistenceManager,
         health_monitor: ProviderHealthMonitor,
         refresh_interval: float = DEFAULT_REFRESH_INTERVAL,
+        evaluation_store: Optional[EvaluationStore] = None,
+        quality_gate: Optional[QualityGate] = None,
+        regression_detector: Optional[RegressionDetector] = None,
     ) -> None:
         """Initialize dashboard component references and thread state."""
         self.task_queue = task_queue
@@ -161,6 +191,13 @@ class Dashboard:
         self.persistence_manager = persistence_manager
         self.health_monitor = health_monitor
         self.refresh_interval = max(float(refresh_interval), 0.1)
+        state_dir = self.persistence_manager.state_dir
+        self.evaluation_store = evaluation_store or EvaluationStore(state_dir)
+        self.regression_detector = regression_detector or RegressionDetector(
+            self.evaluation_store,
+            state_dir,
+        )
+        self.quality_gate = quality_gate or self._default_quality_gate(state_dir)
         self._started_at = datetime.now(timezone.utc)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -200,6 +237,7 @@ class Dashboard:
             uptime=self._uptime(),
             agents=self._agent_statuses(pending_count),
             providers=self._provider_statuses(),
+            quality=self._quality_rows(),
             queue=QueueSummary(
                 pending=pending_count,
                 blocked=blocked_count,
@@ -243,6 +281,10 @@ class Dashboard:
             Layout(
                 Panel(self._providers_table(data.providers), title=TITLE_PROVIDERS),
                 name=LAYOUT_PROVIDERS,
+            ),
+            Layout(
+                Panel(self._quality_table(data.quality), title=TITLE_QUALITY),
+                name=LAYOUT_QUALITY,
             ),
         )
         return layout
@@ -312,6 +354,19 @@ class Dashboard:
             for provider_name, healthy in statuses.items()
         )
 
+    def _quality_rows(self) -> tuple[QualityRow, ...]:
+        """Return local quality metrics for dashboard display."""
+        baselines = self._quality_baselines()
+        return tuple(
+            QualityRow(
+                agent_name=agent_name,
+                avg_score=self._agent_average_score(agent_name),
+                block_rate=self._agent_block_rate(agent_name),
+                baseline_count=self._agent_baseline_count(agent_name, baselines),
+            )
+            for agent_name in AGENT_NAMES
+        )
+
     def _recent_decisions(self) -> tuple[DecisionRow, ...]:
         """Return the most recent decision log rows."""
         records = self._decision_records(DECISION_LIMIT)
@@ -365,6 +420,55 @@ class Dashboard:
             return {}
         return payload if isinstance(payload, Mapping) else {}
 
+    def _default_quality_gate(self, state_dir: Path) -> QualityGate:
+        """Create the local quality gate used by the dashboard."""
+        static_analyzer = StaticAnalyzer()
+        quality_scorer = QualityScorer(static_analyzer, self.evaluation_store)
+        return QualityGate(
+            DEFAULT_POLICIES,
+            quality_scorer,
+            self.regression_detector,
+            state_dir / GATE_LOG_NAME,
+        )
+
+    def _agent_average_score(self, agent_name: str) -> Optional[float]:
+        """Return average evaluation score for an agent without raising."""
+        try:
+            return self.evaluation_store.get_agent_average_score(
+                agent_name,
+                QUALITY_EVALUATOR_NAME,
+            )
+        except Exception:
+            return None
+
+    def _agent_block_rate(self, agent_name: str) -> float:
+        """Return recent quality gate block rate for an agent without raising."""
+        try:
+            return self.quality_gate.get_block_rate(agent_name, QUALITY_GATE_WINDOW)
+        except Exception:
+            return 0.0
+
+    def _quality_baselines(self) -> Mapping[str, Mapping[str, Any]]:
+        """Return regression baselines without raising."""
+        try:
+            baselines = self.regression_detector.get_all_baselines()
+        except Exception:
+            return {}
+        return baselines if isinstance(baselines, Mapping) else {}
+
+    def _agent_baseline_count(
+        self,
+        agent_name: str,
+        baselines: Mapping[str, Mapping[str, Any]],
+    ) -> int:
+        """Return number of regression baselines stored for one agent."""
+        return sum(
+            1
+            for record in baselines.values()
+            if isinstance(record, Mapping)
+            and str(record.get(FIELD_AGENT_NAME, TEXT_NONE)) == agent_name
+        )
+
     def _uptime(self) -> str:
         """Return dashboard uptime as HH:MM:SS."""
         elapsed_seconds = int(
@@ -392,6 +496,15 @@ class Dashboard:
             self._header_text(data),
             self._queue_text(data.queue),
         ]
+        lines.extend(
+            TEXT_QUALITY_TEMPLATE.format(
+                agent=row.agent_name,
+                score=self._quality_score_text(row.avg_score),
+                block_rate=self._quality_block_rate_text(row.block_rate),
+                baselines=row.baseline_count,
+            )
+            for row in data.quality
+        )
         lines.extend(
             TEXT_DECISION_TEMPLATE.format(
                 time=decision.timestamp,
@@ -437,6 +550,22 @@ class Dashboard:
             table.add_row(provider.name, self._provider_health_text(provider))
         return table
 
+    def _quality_table(self, rows: tuple[QualityRow, ...]) -> Any:
+        """Return the Rich quality metrics table."""
+        table = Table(title=TITLE_QUALITY)
+        table.add_column(COLUMN_AGENT)
+        table.add_column(COLUMN_SCORE)
+        table.add_column(COLUMN_BLOCK_RATE)
+        table.add_column(COLUMN_BASELINES)
+        for row in rows:
+            table.add_row(
+                row.agent_name,
+                self._quality_score_text(row.avg_score),
+                self._quality_block_rate_text(row.block_rate),
+                str(row.baseline_count),
+            )
+        return table
+
     def _decisions_table(self, decisions: tuple[DecisionRow, ...]) -> Any:
         """Return the Rich recent decisions table."""
         table = Table()
@@ -459,6 +588,16 @@ class Dashboard:
         status = STATUS_HEALTHY if provider.healthy else STATUS_DOWN
         return TEXT_PROVIDER_TEMPLATE.format(icon=icon, status=status)
 
+    def _quality_score_text(self, score: Optional[float]) -> str:
+        """Return display text for an optional quality score."""
+        if score is None:
+            return QUALITY_SCORE_MISSING
+        return QUALITY_SCORE_TEMPLATE.format(score=score)
+
+    def _quality_block_rate_text(self, block_rate: float) -> str:
+        """Return display text for a quality gate block rate."""
+        return QUALITY_BLOCK_RATE_TEMPLATE.format(block_rate=block_rate * 100.0)
+
 
 __all__ = [
     "AgentStatus",
@@ -466,5 +605,6 @@ __all__ = [
     "DashboardData",
     "DecisionRow",
     "ProviderStatus",
+    "QualityRow",
     "QueueSummary",
 ]
