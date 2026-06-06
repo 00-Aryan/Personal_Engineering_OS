@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import queue
+import threading
 from fnmatch import fnmatch
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +65,10 @@ TEST_FILE_SUFFIX = "_test.py"
 SOURCE_AGENT = "trigger_system"
 PAYLOAD_KEY_FILE_PATH = "file_path"
 PAYLOAD_KEY_MODIFIED_AT = "modified_at"
+LOGGER_NAME = "projectos.trigger_system"
+LOG_INDEX_UPDATED_TEMPLATE = "Index updated for {file_path}"
+
+logger = logging.getLogger(LOGGER_NAME)
 
 
 def _utc_timestamp() -> str:
@@ -78,12 +84,14 @@ class FileChangeHandler(FileSystemEventHandler):
         event_dispatcher: queue.Queue[AgentEvent],
         watch_patterns: Optional[Iterable[str]] = None,
         ignore_patterns: Optional[Iterable[str]] = None,
+        code_indexer: Optional[Any] = None,
     ) -> None:
         """Initialize the handler with a queue dispatcher."""
         super().__init__()
         self.event_dispatcher = event_dispatcher
         self.watch_patterns = list(watch_patterns or DEFAULT_WATCH_PATTERNS)
         self.ignore_patterns = list(ignore_patterns or DEFAULT_IGNORE_PATTERNS)
+        self.code_indexer = code_indexer
 
     def on_modified(self, event: Any) -> None:
         """Emit CODE_CHANGED for modified Python files without blocking."""
@@ -112,6 +120,7 @@ class FileChangeHandler(FileSystemEventHandler):
             self.event_dispatcher.put_nowait(agent_event)
         except queue.Full:
             return
+        self._update_index_async(changed_path)
 
     def _should_ignore(self, changed_path: Path) -> bool:
         """Return whether a filesystem path should be ignored."""
@@ -136,6 +145,26 @@ class FileChangeHandler(FileSystemEventHandler):
             TEST_FILE_SUFFIX
         )
 
+    def _update_index_async(self, changed_path: Path) -> None:
+        """Update the code index in a background thread when configured."""
+        if self.code_indexer is None or changed_path.suffix != PYTHON_EXTENSION:
+            return
+        thread = threading.Thread(
+            target=self._update_index,
+            args=(changed_path,),
+            name=LOGGER_NAME,
+            daemon=True,
+        )
+        thread.start()
+
+    def _update_index(self, changed_path: Path) -> None:
+        """Update the code index for one changed path without raising."""
+        try:
+            self.code_indexer.update_file(changed_path)
+            logger.info(LOG_INDEX_UPDATED_TEMPLATE.format(file_path=changed_path))
+        except Exception as error:
+            logger.warning("Code index update failed for %s: %s", changed_path, error)
+
 
 class TriggerSystem:
     """Watch a directory and enqueue ProjectOS file-change events."""
@@ -146,6 +175,7 @@ class TriggerSystem:
         event_dispatcher: queue.Queue[AgentEvent],
         watch_patterns: Optional[Iterable[str]] = None,
         ignore_patterns: Optional[Iterable[str]] = None,
+        code_indexer: Optional[Any] = None,
     ) -> None:
         """Initialize the trigger system with a watch directory and queue."""
         self.watch_dir = Path(watch_dir)
@@ -154,6 +184,7 @@ class TriggerSystem:
             event_dispatcher,
             watch_patterns=watch_patterns,
             ignore_patterns=ignore_patterns,
+            code_indexer=code_indexer,
         )
         self.observer = Observer()
         self._running = False

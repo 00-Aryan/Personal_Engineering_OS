@@ -8,11 +8,15 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, TYPE_CHECKING
 
 from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
+
+if TYPE_CHECKING:
+    from core.intelligence.collaboration import CollaborationBroker
+    from core.intelligence.memory_manager import MemoryManager
 
 
 AGENT_NAME = "test"
@@ -132,9 +136,18 @@ class TestAgent(BaseAgent):
         model_provider: ModelProvider,
         logger: logging.Logger,
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
+        memory_manager: Optional["MemoryManager"] = None,
+        collaboration_broker: Optional["CollaborationBroker"] = None,
     ) -> None:
         """Initialize TestAgent with model access and project paths."""
-        super().__init__(AGENT_NAME, ROLE_DESCRIPTION, model_provider, logger)
+        super().__init__(
+            AGENT_NAME,
+            ROLE_DESCRIPTION,
+            model_provider,
+            logger,
+            memory_manager=memory_manager,
+            collaboration_broker=collaboration_broker,
+        )
         self.project_root = Path(project_root)
 
     def handle(self, event: AgentEvent) -> AgentResult:

@@ -28,6 +28,23 @@
 - Tests written immediately after implementation
 - Import checks must pass before task is complete
 
+## Intelligence Components (Phase 4)
+
+### Before any agent call, the following context is assembled:
+1. Codebase context: retrieved via CodeIndexer + ContextRetriever
+2. Memory context: recalled via MemoryManager
+3. Routing: classified via SemanticRouter
+
+### Test command for intelligence components:
+UV_CACHE_DIR=/tmp/uv-cache PYTHONDONTWRITEBYTECODE=1 \
+uv run --no-sync python scripts/intelligence_smoke.py
+
+### Never do in intelligence components:
+- Hard-code routing rules without adding semantic examples
+- Add synchronous model calls to memory storage (async or skip)
+- Exceed consultation depth > 1
+- Store raw model outputs as memories without distillation
+
 ## Never Do
 - Skip writing the RESULT file
 - Start next task without completing current one

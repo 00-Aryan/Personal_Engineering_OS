@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Iterable, List, Mapping, Optional, Sequence, TYPE_CHECKING
 
 from core.base_agent import BaseAgent
 from core.decision_log import DecisionLogger
@@ -20,6 +20,11 @@ from core.evaluation.regression_detector import RegressionDetector
 from core.evaluation.schema_validator import SchemaValidator, ValidationResult
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
+
+if TYPE_CHECKING:
+    from core.intelligence.collaboration import CollaborationBroker
+    from core.intelligence.memory_manager import MemoryManager
+    from core.intelligence.semantic_router import SemanticRouter
 
 
 AGENT_NAME = "clone"
@@ -82,6 +87,15 @@ TARGET_CODE_WRITING_AGENT = "code_writing_agent"
 TARGET_DOCS_AGENT = "docs_agent"
 TARGET_PLANNING_AGENT = "planning_agent"
 TARGET_TEST_AGENT = "test_agent"
+
+SEMANTIC_TARGET_ALIASES = {
+    "planning": TARGET_PLANNING_AGENT,
+    "code_writing": TARGET_CODE_WRITING_AGENT,
+    "code_review": TARGET_CODE_REVIEW_AGENT,
+    "architecture": TARGET_ARCHITECTURE_AGENT,
+    "test": TARGET_TEST_AGENT,
+    "docs": TARGET_DOCS_AGENT,
+}
 
 TASK_TYPE_ARCHITECTURE = "architecture"
 TASK_TYPE_CODE = "code"
@@ -235,9 +249,19 @@ class CloneAgent(BaseAgent):
         regression_detector: Optional[RegressionDetector] = None,
         evaluation_store: Optional[EvaluationStore] = None,
         quality_gate: Optional[QualityGate] = None,
+        memory_manager: Optional["MemoryManager"] = None,
+        semantic_router: Optional["SemanticRouter"] = None,
+        collaboration_broker: Optional["CollaborationBroker"] = None,
     ) -> None:
         """Initialize CloneAgent state and required project log files."""
-        super().__init__(AGENT_NAME, ROLE_DESCRIPTION, model_provider, logger)
+        super().__init__(
+            AGENT_NAME,
+            ROLE_DESCRIPTION,
+            model_provider,
+            logger,
+            memory_manager=memory_manager,
+            collaboration_broker=collaboration_broker,
+        )
         self.project_root = Path(project_root)
         self.event_queue = list(queued_events or [])
         self.blocked_events: List[AgentEvent] = []
@@ -247,11 +271,18 @@ class CloneAgent(BaseAgent):
         self.regression_detector = regression_detector
         self.evaluation_store = evaluation_store
         self.quality_gate = quality_gate
+        self.semantic_router = semantic_router
         self.decision_logger = DecisionLogger(self.project_root)
         self._ensure_project_files()
 
     def classify_decision(self, event: AgentEvent) -> DecisionCategory:
         """Classify an incoming event into a Clone decision category."""
+        if self.semantic_router is not None:
+            return self._semantic_decision_category(event)
+        return self._keyword_decision_category(event)
+
+    def _keyword_decision_category(self, event: AgentEvent) -> DecisionCategory:
+        """Classify an event using the legacy keyword and event-type rules."""
         if self._should_defer(event):
             return DecisionCategory.DEFER_PARALLEL
         if self._should_escalate(event):
@@ -262,6 +293,23 @@ class CloneAgent(BaseAgent):
         ):
             return DecisionCategory.AUTONOMOUS
         return DecisionCategory.AUTONOMOUS
+
+    def _semantic_decision_category(self, event: AgentEvent) -> DecisionCategory:
+        """Classify an event with semantic routing and keyword fallback."""
+        decision = self.semantic_router.route(self._event_description(event))
+        self.logger.info(
+            "Semantic route method=%s confidence=%.2f nearest=%s category=%s",
+            decision.routing_method,
+            decision.confidence,
+            decision.nearest_example,
+            decision.category,
+        )
+        if decision.routing_method == "keyword_fallback":
+            self.logger.warning("Semantic confidence low, used keyword fallback")
+        try:
+            return DecisionCategory(decision.category)
+        except ValueError:
+            return self._keyword_decision_category(event)
 
     def dispatch(self, event: AgentEvent) -> List[AgentEvent]:
         """Create and optionally submit child events for responsible agents."""
@@ -523,6 +571,17 @@ class CloneAgent(BaseAgent):
 
     def _dispatch_targets(self, event: AgentEvent) -> List[str]:
         """Return target agent names for a dispatchable event."""
+        explicit_targets = self._explicit_dispatch_targets(event)
+        if self.semantic_router is not None and (
+            event.event_type is EventType.MANUAL_TRIGGER or not explicit_targets
+        ):
+            semantic_targets = self._semantic_dispatch_targets(event)
+            if semantic_targets:
+                return semantic_targets
+        return explicit_targets
+
+    def _explicit_dispatch_targets(self, event: AgentEvent) -> List[str]:
+        """Return dispatch targets from legacy explicit routing rules."""
         if event.event_type is EventType.CODE_CHANGED:
             return [TARGET_CODE_REVIEW, TARGET_TEST_AGENT, TARGET_DOCS_AGENT]
         if event.event_type is EventType.NEW_FEATURE:
@@ -538,6 +597,23 @@ class CloneAgent(BaseAgent):
         if event.event_type is EventType.MANUAL_TRIGGER:
             return self._manual_trigger_targets(event.payload)
         return []
+
+    def _semantic_dispatch_targets(self, event: AgentEvent) -> List[str]:
+        """Return semantic-router dispatch targets for an event."""
+        if self.semantic_router is None:
+            return []
+        decision = self.semantic_router.route(self._event_description(event))
+        target_agent = SEMANTIC_TARGET_ALIASES.get(decision.category)
+        if target_agent is None:
+            return []
+        self.logger.info(
+            "Semantic dispatch method=%s confidence=%.2f nearest=%s target=%s",
+            decision.routing_method,
+            decision.confidence,
+            decision.nearest_example,
+            target_agent,
+        )
+        return [target_agent]
 
     def _target_for_backlog(self, payload: Mapping[str, Any]) -> str:
         """Classify a backlog payload and return the target agent."""
@@ -783,6 +859,10 @@ class CloneAgent(BaseAgent):
     def _duration_ms(self, started_at: float) -> int:
         """Return elapsed milliseconds from a monotonic start time."""
         return int((perf_counter() - started_at) * 1000)
+
+    def _event_description(self, event: AgentEvent) -> str:
+        """Return a compact event description for semantic routing."""
+        return f"{event.event_type.value}: {str(event.payload)[:200]}"
 
 
 __all__ = ["CloneAgent", "DecisionCategory"]

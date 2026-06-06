@@ -9,12 +9,17 @@ import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Mapping, Optional, Sequence
+from typing import Any, List, Mapping, Optional, Sequence, TYPE_CHECKING
 
 from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventType
 from core.git_manager import GitManager
 from core.model_provider import ModelProvider
+
+if TYPE_CHECKING:
+    from core.intelligence.collaboration import CollaborationBroker
+    from core.intelligence.context_retriever import ContextRetriever
+    from core.intelligence.memory_manager import MemoryManager
 
 
 AGENT_NAME = "code_review"
@@ -46,9 +51,18 @@ SYSTEM_PROMPT = (
     "suggested_fix\n"
     "Output a JSON array of issues. If no issues, output empty array []."
 )
+CONTEXT_SYSTEM_PROMPT_TEMPLATE = (
+    "{system_prompt}\n\n"
+    "You have access to relevant codebase context:\n{context}"
+)
+MEMORY_SYSTEM_PROMPT_TEMPLATE = (
+    "{system_prompt}\n\n"
+    "You have reviewed similar code before:\n{memories}"
+)
 
 PAYLOAD_KEY_FILE_PATH = "file_path"
 PAYLOAD_KEY_TASK_ID = "task_id"
+PAYLOAD_KEY_TASK_DESCRIPTION = "task_description"
 PAYLOAD_KEY_AFFECTED_FILES = "affected_files"
 PAYLOAD_KEY_REVIEW_REPORT = "review_report"
 PAYLOAD_KEY_ISSUES = "issues"
@@ -211,9 +225,20 @@ class CodeReviewAgent(BaseAgent):
         logger: logging.Logger,
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
         git_manager: Optional[GitManager] = None,
+        context_retriever: Optional["ContextRetriever"] = None,
+        memory_manager: Optional["MemoryManager"] = None,
+        collaboration_broker: Optional["CollaborationBroker"] = None,
     ) -> None:
         """Initialize CodeReviewAgent with model access and review paths."""
-        super().__init__(AGENT_NAME, ROLE_DESCRIPTION, model_provider, logger)
+        super().__init__(
+            AGENT_NAME,
+            ROLE_DESCRIPTION,
+            model_provider,
+            logger,
+            context_retriever=context_retriever,
+            memory_manager=memory_manager,
+            collaboration_broker=collaboration_broker,
+        )
         self.project_root = Path(project_root)
         self.git_manager = git_manager
         self._ensure_reviews_dir()
@@ -233,10 +258,15 @@ class CodeReviewAgent(BaseAgent):
 
         code = file_path.read_text(encoding=ENCODING)
         task_id = self._task_id(event.payload)
+        memories = self.recall_relevant(query=f"review {file_path}", k=3)
+        context = self.get_context(
+            task_description=self._task_description(event.payload),
+            file_path=str(file_path),
+        )
         prompt = self._build_prompt(file_path, task_id, code)
         model_output = self.model_provider.complete(
             prompt,
-            SYSTEM_PROMPT,
+            self._system_prompt(context, memories),
             MODEL_MAX_TOKENS,
         )
         try:
@@ -259,6 +289,12 @@ class CodeReviewAgent(BaseAgent):
         )
         self._auto_commit_reviewed_file(file_path, len(issues), blocker_count)
         self._log_decision(event, DECISION_SUCCESS, reasoning)
+        self.remember(
+            decision=f"Reviewed {file_path}",
+            context=f"File: {file_path}",
+            outcome=f"Found {len(issues)} issues",
+            quality_score=None,
+        )
         return AgentResult(
             success=True,
             output={
@@ -339,6 +375,29 @@ class CodeReviewAgent(BaseAgent):
         if isinstance(task_id, str) and task_id.strip():
             return task_id.strip()
         return None
+
+    def _task_description(self, payload: Mapping[str, Any]) -> str:
+        """Return task description text for codebase context retrieval."""
+        task_description = payload.get(PAYLOAD_KEY_TASK_DESCRIPTION)
+        if isinstance(task_description, str):
+            return task_description.strip()
+        task_id = self._task_id(payload)
+        return task_id or EMPTY_TEXT
+
+    def _system_prompt(self, context: Optional[str], memories: str = EMPTY_TEXT) -> str:
+        """Return the review system prompt with optional codebase context and memory."""
+        system_prompt = SYSTEM_PROMPT
+        if context:
+            system_prompt = CONTEXT_SYSTEM_PROMPT_TEMPLATE.format(
+                system_prompt=system_prompt,
+                context=context,
+            )
+        if memories:
+            system_prompt = MEMORY_SYSTEM_PROMPT_TEMPLATE.format(
+                system_prompt=system_prompt,
+                memories=memories,
+            )
+        return system_prompt
 
     def _build_prompt(
         self,

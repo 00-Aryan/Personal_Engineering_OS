@@ -41,6 +41,11 @@ BENCHMARK_HISTORY_PATH = ".projectos_state/benchmark_history.jsonl"
 AUDIT_REPORT_PATH = "audit_report.md"
 GATE_LOG_PATH = ".projectos_state/gate_decisions.jsonl"
 EVALUATIONS_PATH = ".projectos_state/evaluations.jsonl"
+COLLAB_LOG_PATH = ".projectos_state/collaboration.jsonl"
+COLLAB_QUESTION_ONE = "First question?"
+COLLAB_QUESTION_TWO = "Second question?"
+COLLAB_ANSWER_ONE = "First answer."
+COLLAB_ANSWER_TWO = "Second answer."
 
 
 class CapturingTaskQueue:
@@ -278,6 +283,35 @@ class CliTestCase(unittest.TestCase):
         self.assertIn('"total_decisions": 1', result.output)
         self.assertIn('"escalation_rate": 1.0', result.output)
 
+    def test_collab_stats_command_runs(self) -> None:
+        """Verify collab stats prints aggregate consultation data."""
+        self._write_collaboration_log()
+
+        result = self.runner.invoke(
+            cli,
+            ["collab", "stats"],
+            obj={"project_root": self.project_root},
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("total consultations: 2", result.output)
+        self.assertIn("architecture_review", result.output)
+
+    def test_collab_log_command_shows_tail(self) -> None:
+        """Verify collab log prints the requested recent consultations."""
+        self._write_collaboration_log()
+
+        result = self.runner.invoke(
+            cli,
+            ["collab", "log", "--tail", "1"],
+            obj={"project_root": self.project_root},
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn(COLLAB_QUESTION_TWO, result.output)
+        self.assertIn(COLLAB_ANSWER_TWO, result.output)
+        self.assertNotIn(COLLAB_QUESTION_ONE, result.output)
+
     def test_gate_status_command_runs(self) -> None:
         """Verify gate status prints recent gate decisions."""
         result = self.runner.invoke(
@@ -494,6 +528,45 @@ class CliTestCase(unittest.TestCase):
         )
         gate_path.write_text(
             json.dumps(gate_payload, sort_keys=True) + "\n",
+            encoding=TEST_ENCODING,
+        )
+
+    def _write_collaboration_log(self) -> None:
+        """Write minimal collaboration log records for CLI tests."""
+        collab_path = self.project_root / COLLAB_LOG_PATH
+        collab_path.parent.mkdir(parents=True, exist_ok=True)
+        records = [
+            {
+                "answer": COLLAB_ANSWER_ONE,
+                "confidence": 0.8,
+                "consultation_id": "collab-1",
+                "consultation_type": "feasibility_check",
+                "depth": 0,
+                "duration_ms": 4,
+                "question": COLLAB_QUESTION_ONE,
+                "recommended_action": None,
+                "requesting_agent": "planning",
+                "responding_agent": "code_review",
+                "target_agent": "code_review",
+                "timestamp": "2026-06-06T00:00:00+00:00",
+            },
+            {
+                "answer": COLLAB_ANSWER_TWO,
+                "confidence": 0.9,
+                "consultation_id": "collab-2",
+                "consultation_type": "architecture_review",
+                "depth": 1,
+                "duration_ms": 6,
+                "question": COLLAB_QUESTION_TWO,
+                "recommended_action": "continue",
+                "requesting_agent": "code_writing",
+                "responding_agent": "architecture",
+                "target_agent": "architecture",
+                "timestamp": "2026-06-06T00:00:01+00:00",
+            },
+        ]
+        collab_path.write_text(
+            "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
             encoding=TEST_ENCODING,
         )
 

@@ -80,6 +80,41 @@ Generate a quality audit report:
 uv run projectos audit --days 7
 ```
 
+## Agent Intelligence (Phase 4)
+
+ProjectOS agents are context-aware through three mechanisms:
+
+**Codebase RAG**: Before acting, agents retrieve relevant code from an indexed vector store of your repository.
+
+**Agent Memory**: Agents accumulate episodic, semantic, and procedural memories that improve output quality over time.
+
+**Semantic Routing**: Clone classifies events using embedding similarity rather than keyword matching.
+
+**Agent Collaboration**: Agents consult each other for complex tasks, bounded by depth limits to prevent cascades.
+
+```text
+Incoming Event
+     |
+     v
+SemanticRouter (classify + route)
+     |
+     v
+ContextRetriever (fetch relevant code)
++ MemoryManager (recall past experience)
+     |
+     v
+Agent (informed model call)
+     |
+     v
+CollaborationBroker (consult if needed)
+     |
+     v
+Quality Gate (evaluate output)
+     |
+     v
+MemoryManager.learn_from_evaluation() (store learnings)
+```
+
 ## Agent Roster
 
 | Name | Role | Trigger | Model |

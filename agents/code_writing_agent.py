@@ -8,13 +8,19 @@ import os
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, TYPE_CHECKING
 
 from core.base_agent import BaseAgent
 from core.evaluation.static_analyzer import StaticAnalysisReport, StaticAnalyzer
 from core.events import AgentEvent, AgentResult, EventType
+from core.intelligence.collaboration import ConsultationType
 from core.model_provider import ModelProvider
 from core.safety import SafetyPolicy, SafetyResult
+
+if TYPE_CHECKING:
+    from core.intelligence.collaboration import CollaborationBroker
+    from core.intelligence.context_retriever import ContextRetriever
+    from core.intelligence.memory_manager import MemoryManager
 
 
 AGENT_NAME = "code_writing"
@@ -41,12 +47,17 @@ SYSTEM_PROMPT = (
     "- Write the simplest code that satisfies requirements\n"
     "- Output ONLY the code block, no explanation, no markdown fences"
 )
+CONTEXT_SYSTEM_PROMPT_TEMPLATE = (
+    "{system_prompt}\n\n"
+    "You have access to relevant codebase context:\n{context}"
+)
 
 PAYLOAD_KEY_ACCEPTANCE_CRITERIA = "acceptance_criteria"
 PAYLOAD_KEY_AFFECTED_FILES = "affected_files"
 PAYLOAD_KEY_EXISTING_CODE = "existing_code"
 PAYLOAD_KEY_FILE_PATH = "file_path"
 PAYLOAD_KEY_LINE_COUNT = "line_count"
+PAYLOAD_KEY_ESTIMATED_COMPLEXITY = "estimated_complexity"
 PAYLOAD_KEY_TASK_DESCRIPTION = "task_description"
 PAYLOAD_KEY_TASK_ID = "task_id"
 
@@ -54,9 +65,19 @@ PROMPT_TASK_ID_LABEL = "Task ID:"
 PROMPT_TASK_DESCRIPTION_LABEL = "Task description:"
 PROMPT_ACCEPTANCE_LABEL = "Acceptance criteria:"
 PROMPT_EXISTING_CODE_LABEL = "Existing code:"
+PROMPT_ARCHITECTURE_GUIDANCE_LABEL = "Architecture guidance for this implementation:"
 PROMPT_INSTRUCTION = "Return only the complete Python file content."
 PROMPT_LIST_PREFIX = "- "
 PROMPT_SECTION_SEPARATOR = "\n\n"
+COMPLEX_TASK_KEYWORDS = (
+    "auth",
+    "security",
+    "database",
+    "migration",
+    "architecture",
+)
+COMPLEX_TASK_COMPLEXITIES = frozenset({"L", "XL"})
+TARGET_ARCHITECTURE_AGENT = "architecture"
 
 DECISION_LOG_PREFIX = "["
 DECISION_LOG_SEPARATOR = "] ["
@@ -135,15 +156,27 @@ class CodeWritingAgent(BaseAgent):
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
         safety_policy: Optional[SafetyPolicy] = None,
         static_analyzer: Optional[StaticAnalyzer] = None,
+        context_retriever: Optional["ContextRetriever"] = None,
+        memory_manager: Optional["MemoryManager"] = None,
+        collaboration_broker: Optional["CollaborationBroker"] = None,
     ) -> None:
         """Initialize CodeWritingAgent with model access and project paths."""
-        super().__init__(AGENT_NAME, ROLE_DESCRIPTION, model_provider, logger)
+        super().__init__(
+            AGENT_NAME,
+            ROLE_DESCRIPTION,
+            model_provider,
+            logger,
+            context_retriever=context_retriever,
+            memory_manager=memory_manager,
+            collaboration_broker=collaboration_broker,
+        )
         self.project_root = Path(project_root)
         self.safety_policy = safety_policy
         self.static_analyzer = static_analyzer
 
     def handle(self, event: AgentEvent) -> AgentResult:
         """Write code for an incoming task event and emit CODE_WRITTEN."""
+        self.update_consultation_depth(event)
         payload_error = self._validate_payload(event.payload)
         if payload_error:
             return self._failure_result(event, payload_error)
@@ -151,10 +184,22 @@ class CodeWritingAgent(BaseAgent):
         task_id = str(event.payload[PAYLOAD_KEY_TASK_ID])
         file_path = self._resolve_path(str(event.payload[PAYLOAD_KEY_FILE_PATH]))
         existing_code = self._existing_code(file_path, event.payload)
-        prompt = self._build_prompt(event.payload, existing_code)
+        architecture_guidance = self._architecture_guidance(
+            event.payload,
+            existing_code,
+        )
+        prompt = self._build_prompt(
+            event.payload,
+            existing_code,
+            architecture_guidance,
+        )
+        context = self.get_context(
+            task_description=str(event.payload.get(PAYLOAD_KEY_TASK_DESCRIPTION, EMPTY_TEXT)),
+            file_path=str(file_path),
+        )
         model_output = self.model_provider.complete(
             prompt,
-            SYSTEM_PROMPT,
+            self._system_prompt(context),
             MODEL_MAX_TOKENS,
         )
         code = self._normalize_model_code(model_output)
@@ -354,19 +399,66 @@ class CodeWritingAgent(BaseAgent):
             return existing_code
         return EMPTY_TEXT
 
-    def _build_prompt(self, payload: Mapping[str, Any], existing_code: str) -> str:
+    def _build_prompt(
+        self,
+        payload: Mapping[str, Any],
+        existing_code: str,
+        architecture_guidance: Optional[str] = None,
+    ) -> str:
         """Build a code-generation prompt from task payload fields."""
         task_id = str(payload[PAYLOAD_KEY_TASK_ID])
         description = str(payload[PAYLOAD_KEY_TASK_DESCRIPTION]).strip()
         criteria = self._criteria_lines(payload.get(PAYLOAD_KEY_ACCEPTANCE_CRITERIA))
-        return PROMPT_SECTION_SEPARATOR.join(
-            [
-                f"{PROMPT_TASK_ID_LABEL} {task_id}",
-                f"{PROMPT_TASK_DESCRIPTION_LABEL}\n{description}",
-                f"{PROMPT_ACCEPTANCE_LABEL}\n{criteria}",
-                f"{PROMPT_EXISTING_CODE_LABEL}\n{existing_code}",
-                PROMPT_INSTRUCTION,
-            ]
+        prompt_parts = [
+            f"{PROMPT_TASK_ID_LABEL} {task_id}",
+            f"{PROMPT_TASK_DESCRIPTION_LABEL}\n{description}",
+            f"{PROMPT_ACCEPTANCE_LABEL}\n{criteria}",
+            f"{PROMPT_EXISTING_CODE_LABEL}\n{existing_code}",
+        ]
+        if architecture_guidance:
+            prompt_parts.append(
+                f"{PROMPT_ARCHITECTURE_GUIDANCE_LABEL}\n{architecture_guidance}"
+            )
+        prompt_parts.append(PROMPT_INSTRUCTION)
+        return PROMPT_SECTION_SEPARATOR.join(prompt_parts)
+
+    def _architecture_guidance(
+        self,
+        payload: Mapping[str, Any],
+        existing_code: str,
+    ) -> Optional[str]:
+        """Return architecture guidance for complex implementation tasks."""
+        task_description = str(payload.get(PAYLOAD_KEY_TASK_DESCRIPTION, EMPTY_TEXT))
+        if not self._is_complex_task(payload, task_description):
+            return None
+        return self.consult(
+            target_agent=TARGET_ARCHITECTURE_AGENT,
+            question=f"Is this implementation approach appropriate? {task_description}",
+            context=existing_code or EMPTY_TEXT,
+            consultation_type=ConsultationType.ARCHITECTURE_REVIEW,
+        )
+
+    def _is_complex_task(
+        self,
+        payload: Mapping[str, Any],
+        task_description: str,
+    ) -> bool:
+        """Return True when the implementation should request architecture review."""
+        normalized_description = task_description.lower()
+        if any(keyword in normalized_description for keyword in COMPLEX_TASK_KEYWORDS):
+            return True
+        estimated_complexity = payload.get(PAYLOAD_KEY_ESTIMATED_COMPLEXITY)
+        if not isinstance(estimated_complexity, str):
+            return False
+        return estimated_complexity.strip().upper() in COMPLEX_TASK_COMPLEXITIES
+
+    def _system_prompt(self, context: Optional[str]) -> str:
+        """Return the writing system prompt with optional codebase context."""
+        if not context:
+            return SYSTEM_PROMPT
+        return CONTEXT_SYSTEM_PROMPT_TEMPLATE.format(
+            system_prompt=SYSTEM_PROMPT,
+            context=context,
         )
 
     def _criteria_lines(self, value: Any) -> str:

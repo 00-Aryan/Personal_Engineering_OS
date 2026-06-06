@@ -9,11 +9,17 @@ import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Iterable, List, Mapping, Optional, Sequence, TYPE_CHECKING
 
 from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventPriority, EventType
+from core.intelligence.collaboration import ConsultationType
 from core.model_provider import ModelProvider
+
+if TYPE_CHECKING:
+    from core.intelligence.collaboration import CollaborationBroker
+    from core.intelligence.context_retriever import ContextRetriever
+    from core.intelligence.memory_manager import MemoryManager
 
 
 AGENT_NAME = "planning"
@@ -41,8 +47,13 @@ SYSTEM_PROMPT = (
     "agent_assignment (which agent should execute this),\n"
     "blocked_by (null or description of blocker)."
 )
+MEMORY_SYSTEM_PROMPT_TEMPLATE = (
+    "{system_prompt}\n\n"
+    "Similar planning decisions from this project:\n{memories}"
+)
 PROMPT_DESCRIPTION_LABEL = "Feature description:"
 PROMPT_CONTEXT_LABEL = "Project context:"
+PROMPT_CODEBASE_CONTEXT_LABEL = "Codebase context:"
 PROMPT_INSTRUCTION = "Return a JSON array of task objects."
 PROMPT_SECTION_SEPARATOR = "\n\n"
 
@@ -111,6 +122,8 @@ DEFAULT_COMPLEXITY = COMPLEXITY_MEDIUM
 
 DEFAULT_AGENT_ASSIGNMENT = "planning_agent"
 MODEL_MAX_TOKENS = 4096
+DEFAULT_WORKFLOW_SUCCESS_RATE = 0.7
+MAX_WORKFLOW_NAME_LENGTH = 50
 
 BACKLOG_TITLE = "# ProjectOS Backlog"
 BACKLOG_LAST_UPDATED_LABEL = "Last updated:"
@@ -139,6 +152,11 @@ LOGGER_ERROR_FORMAT = "%s: %s"
 
 OUTPUT_KEY_TASKS = "tasks"
 OUTPUT_KEY_ERROR = "error"
+TARGET_CODE_REVIEW_AGENT = "code_review"
+IMPLEMENTABILITY_WARNING_PREFIX = "⚠ Review note:"
+NOT_IMPLEMENTABLE_TEXT = "not implementable"
+MISSING_TEXT = "missing"
+REVIEW_NOTE_LIMIT = 200
 
 
 @dataclass
@@ -157,6 +175,29 @@ class Task:
     file_path: Optional[str]
     created_at: str
     status: str
+
+    def to_markdown(self) -> str:
+        """Render this task as compact markdown for agent consultation."""
+        dependencies = (
+            ", ".join(self.dependencies) if self.dependencies else BACKLOG_NONE_VALUE
+        )
+        acceptance_lines = [
+            f"{BACKLOG_CHECKLIST_PREFIX} {criterion}"
+            for criterion in self.acceptance_criteria
+        ]
+        lines = [
+            BACKLOG_TASK_HEADING_TEMPLATE.format(task_id=self.id, title=self.title),
+            f"{BACKLOG_TYPE_LABEL} {self.type}",
+            f"{BACKLOG_COMPLEXITY_LABEL} {self.complexity}",
+            f"{BACKLOG_AGENT_LABEL} {self.agent_assignment}",
+            BACKLOG_ACCEPTANCE_LABEL,
+            *acceptance_lines,
+            f"{BACKLOG_DEPENDENCIES_LABEL} {dependencies}",
+            f"{BACKLOG_STATUS_LABEL} {self.status}",
+        ]
+        if self.blocked_by:
+            lines.append(f"{BACKLOG_BLOCKED_BY_LABEL} {self.blocked_by}")
+        return NEWLINE.join(lines)
 
 
 def _utc_timestamp() -> str:
@@ -207,13 +248,25 @@ class PlanningAgent(BaseAgent):
         model_provider: ModelProvider,
         logger: logging.Logger,
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
+        context_retriever: Optional["ContextRetriever"] = None,
+        memory_manager: Optional["MemoryManager"] = None,
+        collaboration_broker: Optional["CollaborationBroker"] = None,
     ) -> None:
         """Initialize PlanningAgent with model access and project paths."""
-        super().__init__(AGENT_NAME, ROLE_DESCRIPTION, model_provider, logger)
+        super().__init__(
+            AGENT_NAME,
+            ROLE_DESCRIPTION,
+            model_provider,
+            logger,
+            context_retriever=context_retriever,
+            memory_manager=memory_manager,
+            collaboration_broker=collaboration_broker,
+        )
         self.project_root = Path(project_root)
 
     def handle(self, event: AgentEvent) -> AgentResult:
         """Handle a feature planning event and emit backlog updates."""
+        self.update_consultation_depth(event)
         if event.event_type not in (EventType.NEW_FEATURE, EventType.MANUAL_TRIGGER):
             return self._failure_result(event, DECISION_REASON_INVALID_EVENT)
 
@@ -221,15 +274,19 @@ class PlanningAgent(BaseAgent):
         if not isinstance(description, str) or not description.strip():
             return self._failure_result(event, DECISION_REASON_INVALID_PAYLOAD)
 
+        clean_description = description.strip()
         project_context = event.payload.get(PAYLOAD_KEY_PROJECT_CONTEXT)
+        memories = self.recall_relevant(query=clean_description, k=3)
+        codebase_context = self.get_context(task_description=clean_description)
         prompt = self._build_prompt(
-            description.strip(),
+            clean_description,
             project_context if isinstance(project_context, str) else None,
+            codebase_context,
         )
 
         model_output = self.model_provider.complete(
             prompt,
-            SYSTEM_PROMPT,
+            self._system_prompt(memories),
             MODEL_MAX_TOKENS,
         )
         try:
@@ -238,9 +295,15 @@ class PlanningAgent(BaseAgent):
             self.logger.error(LOGGER_ERROR_FORMAT, DECISION_REASON_INVALID_JSON, error)
             return self._failure_result(event, DECISION_REASON_INVALID_JSON)
 
+        self._consult_for_extra_large_tasks(tasks)
         self.write_backlog(tasks)
         next_events = [self._backlog_event(task, event) for task in tasks]
         self._log_decision(event, DECISION_SUCCESS, DECISION_REASON_CREATED_BACKLOG)
+        self.remember_workflow(
+            workflow_name=clean_description[:MAX_WORKFLOW_NAME_LENGTH],
+            steps=[task.title for task in tasks],
+            success_rate=DEFAULT_WORKFLOW_SUCCESS_RATE,
+        )
         return AgentResult(
             success=True,
             output={OUTPUT_KEY_TASKS: [asdict(task) for task in tasks]},
@@ -280,6 +343,30 @@ class PlanningAgent(BaseAgent):
         backlog_content = self._render_backlog(tasks)
         _append_atomically(self._backlog_path, backlog_content)
 
+    def _consult_for_extra_large_tasks(self, tasks: Sequence[Task]) -> None:
+        """Ask code review to validate XL planning tasks."""
+        for task in tasks:
+            if task.complexity != COMPLEXITY_EXTRA_LARGE:
+                continue
+            answer = self.consult(
+                target_agent=TARGET_CODE_REVIEW_AGENT,
+                question="Is this task decomposition implementable as written?",
+                context=task.to_markdown(),
+                consultation_type=ConsultationType.FEASIBILITY_CHECK,
+            )
+            if answer and self._answer_flags_implementability_risk(answer):
+                task.acceptance_criteria.append(
+                    f"{IMPLEMENTABILITY_WARNING_PREFIX} {answer[:REVIEW_NOTE_LIMIT]}"
+                )
+
+    def _answer_flags_implementability_risk(self, answer: str) -> bool:
+        """Return True when a consultation answer identifies task risk."""
+        normalized_answer = answer.lower()
+        return (
+            NOT_IMPLEMENTABLE_TEXT in normalized_answer
+            or MISSING_TEXT in normalized_answer
+        )
+
     @property
     def _backlog_path(self) -> Path:
         """Return the project backlog path."""
@@ -290,7 +377,12 @@ class PlanningAgent(BaseAgent):
         """Return the project decisions log path."""
         return self.project_root / DECISIONS_LOG_NAME
 
-    def _build_prompt(self, description: str, project_context: Optional[str]) -> str:
+    def _build_prompt(
+        self,
+        description: str,
+        project_context: Optional[str],
+        codebase_context: Optional[str] = None,
+    ) -> str:
         """Build the model prompt from feature description and context."""
         prompt_parts = [
             f"{PROMPT_DESCRIPTION_LABEL}\n{description}",
@@ -301,7 +393,21 @@ class PlanningAgent(BaseAgent):
                 1,
                 f"{PROMPT_CONTEXT_LABEL}\n{project_context.strip()}",
             )
+        if codebase_context and codebase_context.strip():
+            prompt_parts.insert(
+                -1,
+                f"{PROMPT_CODEBASE_CONTEXT_LABEL}\n{codebase_context.strip()}",
+            )
         return PROMPT_SECTION_SEPARATOR.join(prompt_parts)
+
+    def _system_prompt(self, memories: str) -> str:
+        """Return the planning system prompt with optional memory context."""
+        if not memories:
+            return SYSTEM_PROMPT
+        return MEMORY_SYSTEM_PROMPT_TEMPLATE.format(
+            system_prompt=SYSTEM_PROMPT,
+            memories=memories,
+        )
 
     def _extract_task_items(self, parsed_output: Any) -> List[Mapping[str, Any]]:
         """Extract task mappings from supported JSON shapes."""

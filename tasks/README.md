@@ -35,12 +35,20 @@ Never start a task without reading all existing code first.
 - TASK_26: DONE (phase 3 integration + evaluation audit trail - 189 tests green)
 
 ## Phase 4 — Agent Intelligence
-- TASK_27: PENDING
-- TASK_28: PENDING
-- TASK_29: PENDING
-- TASK_30: PENDING
-- TASK_31: PENDING
-- TASK_32: PENDING
+- TASK_27: DONE (embedding abstraction + vector store - 205 tests green)
+- TASK_28: DONE (codebase RAG repository awareness - 218 tests green)
+- TASK_29: DONE (agent memory learning from past work - 232 tests green)
+- TASK_30: DONE (semantic Clone router - 241 tests green)
+- TASK_31: DONE (agent collaboration protocol - 250 tests green)
+- TASK_32: DONE (phase 4 integration + intelligence smoke - 251 tests green)
+
+## Phase 5 — Production Observability
+- TASK_33: PENDING
+- TASK_34: PENDING
+- TASK_35: PENDING
+- TASK_36: PENDING
+- TASK_37: PENDING
+- TASK_38: PENDING
 
 ## Audit Protocol
 After every task, TASK_XX_RESULT.md must contain:

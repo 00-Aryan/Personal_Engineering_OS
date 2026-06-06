@@ -28,6 +28,21 @@ from core.evaluation.quality_scorer import QualityScorer
 from core.evaluation.regression_detector import RegressionDetector
 from core.evaluation.static_analyzer import StaticAnalyzer
 from core.events import AgentEvent, AgentResult, EventType
+from core.intelligence.code_indexer import CodeIndexer
+from core.intelligence.collaboration import COLLABORATION_LOG_NAME, CollaborationBroker
+from core.intelligence.embedder import EmbedderFactory
+from core.intelligence.semantic_router import (
+    ROUTING_DECISIONS_FILE_NAME,
+    ROUTING_EXAMPLES_COLLECTION,
+    RoutingExample,
+    SemanticRouter,
+)
+from core.intelligence.vector_store import (
+    BaseVectorStore,
+    SearchResult,
+    VectorRecord,
+    VectorStoreFactory,
+)
 from core.project_config import ProjectConfig, ProjectRegistry
 from core.projectos import MultiProjectOS, ProjectOS
 from core.task_queue import TaskQueue
@@ -154,6 +169,53 @@ GATE_FALSE = "no"
 BENCHMARK_RUNNING_MESSAGE = "Running quality benchmark..."
 AUDIT_DEFAULT_DAYS = 7
 AUDIT_SAVED_TEMPLATE = "Saved audit report to {path}"
+CODE_INDEX_COLLECTION_NAME = "code_index"
+INDEX_STATUS_TEMPLATE = (
+    "files indexed: {files}\n"
+    "chunks stored: {chunks}\n"
+    "embedder: {embedder}\n"
+    "last updated: {last_updated}"
+)
+INDEX_REBUILD_TEMPLATE = (
+    "Indexed {files} files, {chunks} chunks, {lines} lines in {duration_ms} ms"
+)
+INDEX_SEARCH_TEMPLATE = "{file_path} | {name} | {score:.2f}\n{preview}"
+INDEX_UNKNOWN_VALUE = "unknown"
+INDEX_PREVIEW_LINES = 3
+ROUTER_STATS_TEMPLATE = (
+    "total decisions: {total}\n"
+    "semantic pct: {semantic_pct:.2f}\n"
+    "fallback pct: {fallback_pct:.2f}\n"
+    "avg confidence: {avg_confidence:.2f}\n"
+    "decisions by category: {decisions_by_category}"
+)
+ROUTER_ADD_EXAMPLE_TEMPLATE = "Added routing example for {category}: {text}"
+ROUTER_TEST_TEMPLATE = (
+    "category: {category}\n"
+    "confidence: {confidence:.2f}\n"
+    "nearest example: {nearest_example}\n"
+    "routing method: {routing_method}"
+)
+COLLAB_STATS_TEMPLATE = (
+    "total consultations: {total}\n"
+    "by type: {by_type}\n"
+    "by requesting agent: {by_requesting_agent}\n"
+    "avg duration ms: {avg_duration_ms}\n"
+    "depth 1 pct: {depth_1_pct:.2f}"
+)
+COLLAB_LOG_TEMPLATE = (
+    "{consultation_type} | {requesting_agent} -> {target_agent} | "
+    "{duration_ms} ms\nQ: {question}\nA: {answer}"
+)
+COLLAB_EMPTY_MESSAGE = "No collaboration consultations found."
+
+
+class EmptyAgentRegistry:
+    """Minimal registry used when reading collaboration stats from disk."""
+
+    def get(self, agent_name: str) -> object:
+        """Raise for all lookup attempts."""
+        raise KeyError(agent_name)
 
 class ReviewSubmissionTarget:
     """Minimal target that records manually submitted review events."""
@@ -608,6 +670,157 @@ def audit(ctx: click.Context, days: int, save_path: Optional[Path], agent_name: 
     _echo_markdown(report)
 
 
+@cli.group(name="index")
+def index_group() -> None:
+    """Inspect and rebuild the ProjectOS code index."""
+
+
+@index_group.command(name="status")
+@click.pass_context
+def index_status(ctx: click.Context) -> None:
+    """Show current code index status."""
+    project_root = _project_root(ctx)
+    embedder, vector_store = _code_index_components(project_root)
+    records = _vector_records(vector_store)
+    files_indexed = len(
+        {
+            str(record.metadata.get(PAYLOAD_KEY_FILE_PATH))
+            for record in records
+            if record.metadata.get(PAYLOAD_KEY_FILE_PATH)
+        }
+    )
+    click.echo(
+        INDEX_STATUS_TEMPLATE.format(
+            files=files_indexed,
+            chunks=vector_store.count(),
+            embedder=embedder.get_embedder_name(),
+            last_updated=_last_index_update(records),
+        )
+    )
+
+
+@index_group.command(name="rebuild")
+@click.pass_context
+def index_rebuild(ctx: click.Context) -> None:
+    """Rebuild the entire code index for the project."""
+    project_root = _project_root(ctx)
+    embedder, vector_store = _code_index_components(project_root)
+    indexer = CodeIndexer(vector_store, embedder)
+    indexer.clear()
+    report = indexer.index_directory(project_root)
+    click.echo(
+        INDEX_REBUILD_TEMPLATE.format(
+            files=report.files_indexed,
+            chunks=report.chunks_created,
+            lines=report.total_lines_indexed,
+            duration_ms=report.duration_ms,
+        )
+    )
+
+
+@index_group.command(name="search")
+@click.argument("query")
+@click.option("--k", type=int, default=5, show_default=True)
+@click.pass_context
+def index_search(ctx: click.Context, query: str, k: int) -> None:
+    """Search indexed code chunks semantically."""
+    project_root = _project_root(ctx)
+    embedder, vector_store = _code_index_components(project_root)
+    results = vector_store.search(embedder.embed(query), k=max(k, 0))
+    for result in results:
+        click.echo(_index_search_row(result))
+
+
+@cli.group(name="router")
+def router_group() -> None:
+    """Inspect and update the semantic Clone router."""
+
+
+@router_group.command(name="stats")
+@click.pass_context
+def router_stats(ctx: click.Context) -> None:
+    """Show semantic routing statistics."""
+    router = _semantic_router(ctx)
+    stats = router.get_routing_stats()
+    click.echo(
+        ROUTER_STATS_TEMPLATE.format(
+            total=stats.get("total_decisions", 0),
+            semantic_pct=float(stats.get("semantic_pct", 0.0)),
+            fallback_pct=float(stats.get("fallback_pct", 0.0)),
+            avg_confidence=float(stats.get("avg_confidence", 0.0)),
+            decisions_by_category=json.dumps(
+                stats.get("decisions_by_category", {}),
+                sort_keys=True,
+            ),
+        )
+    )
+
+
+@router_group.command(name="add-example")
+@click.argument("text")
+@click.option("--category", required=True)
+@click.pass_context
+def router_add_example(ctx: click.Context, text: str, category: str) -> None:
+    """Add a semantic routing example."""
+    router = _semantic_router(ctx)
+    router.add_example(RoutingExample(text=text, category=category))
+    click.echo(ROUTER_ADD_EXAMPLE_TEMPLATE.format(category=category, text=text))
+
+
+@router_group.command(name="test")
+@click.argument("description")
+@click.pass_context
+def router_test(ctx: click.Context, description: str) -> None:
+    """Show how the router classifies an event description."""
+    router = _semantic_router(ctx)
+    decision = router.route(description)
+    click.echo(
+        ROUTER_TEST_TEMPLATE.format(
+            category=decision.category,
+            confidence=decision.confidence,
+            nearest_example=decision.nearest_example,
+            routing_method=decision.routing_method,
+        )
+    )
+
+
+@cli.group(name="collab")
+def collab_group() -> None:
+    """Inspect ProjectOS agent collaboration."""
+
+
+@collab_group.command(name="stats")
+@click.pass_context
+def collab_stats(ctx: click.Context) -> None:
+    """Show collaboration statistics."""
+    stats = _collaboration_broker(ctx).get_collaboration_stats()
+    click.echo(
+        COLLAB_STATS_TEMPLATE.format(
+            total=stats.get("total_consultations", 0),
+            by_type=json.dumps(stats.get("by_type", {}), sort_keys=True),
+            by_requesting_agent=json.dumps(
+                stats.get("by_requesting_agent", {}),
+                sort_keys=True,
+            ),
+            avg_duration_ms=stats.get("avg_duration_ms", 0),
+            depth_1_pct=float(stats.get("depth_1_pct", 0.0)),
+        )
+    )
+
+
+@collab_group.command(name="log")
+@click.option("--tail", type=int, default=10, show_default=True)
+@click.pass_context
+def collab_log(ctx: click.Context, tail: int) -> None:
+    """Show recent collaboration consultations."""
+    records = _collaboration_log_records(_project_root(ctx), max(tail, 0))
+    if not records:
+        click.echo(COLLAB_EMPTY_MESSAGE)
+        return
+    for record in records:
+        click.echo(_collaboration_log_row(record))
+
+
 def _project_root(ctx: click.Context) -> Path:
     """Return the active project root from Click context."""
     value = ctx.obj.get("project_root") if ctx.obj else None
@@ -643,6 +856,126 @@ def _quality_gate(ctx: click.Context) -> QualityGate:
         quality_scorer,
         regression_detector,
         state_dir / GATE_LOG_NAME,
+    )
+
+
+def _code_index_components(project_root: Path) -> tuple[Any, BaseVectorStore]:
+    """Return the embedder and vector store used for code indexing."""
+    state_dir = project_root / STATE_DIR_PATH
+    embedder = EmbedderFactory.create(state_dir)
+    vector_store = VectorStoreFactory.create(
+        CODE_INDEX_COLLECTION_NAME,
+        state_dir,
+        embedder,
+    )
+    return embedder, vector_store
+
+
+def _semantic_router(ctx: click.Context) -> SemanticRouter:
+    """Return a semantic router from context or local project state."""
+    if ctx.obj is not None and "semantic_router" in ctx.obj:
+        return ctx.obj["semantic_router"]
+    project_root = _project_root(ctx)
+    state_dir = project_root / STATE_DIR_PATH
+    embedder = EmbedderFactory.create(state_dir)
+    vector_store = VectorStoreFactory.create(
+        ROUTING_EXAMPLES_COLLECTION,
+        state_dir,
+        embedder,
+    )
+    return SemanticRouter(
+        embedder,
+        vector_store,
+        log_path=state_dir / ROUTING_DECISIONS_FILE_NAME,
+    )
+
+
+def _collaboration_broker(ctx: click.Context) -> CollaborationBroker:
+    """Return a collaboration broker for local log inspection."""
+    if ctx.obj is not None and "collaboration_broker" in ctx.obj:
+        return ctx.obj["collaboration_broker"]
+    project_root = _project_root(ctx)
+    return CollaborationBroker(
+        EmptyAgentRegistry(),
+        project_root / STATE_DIR_PATH / COLLABORATION_LOG_NAME,
+    )
+
+
+def _collaboration_log_records(
+    project_root: Path,
+    tail: int,
+) -> list[Mapping[str, Any]]:
+    """Return recent valid collaboration log records."""
+    log_path = project_root / STATE_DIR_PATH / COLLABORATION_LOG_NAME
+    if not log_path.exists() or tail <= 0:
+        return []
+    records: list[Mapping[str, Any]] = []
+    for line in log_path.read_text(encoding=ENCODING).splitlines()[-tail:]:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, Mapping):
+            records.append(record)
+    return records
+
+
+def _collaboration_log_row(record: Mapping[str, Any]) -> str:
+    """Return one formatted collaboration log row."""
+    return COLLAB_LOG_TEMPLATE.format(
+        consultation_type=record.get("consultation_type", MISSING_VALUE),
+        requesting_agent=record.get("requesting_agent", MISSING_VALUE),
+        target_agent=record.get("target_agent", MISSING_VALUE),
+        duration_ms=record.get("duration_ms", 0),
+        question=record.get("question", MISSING_VALUE),
+        answer=record.get("answer", MISSING_VALUE),
+    )
+
+
+def _vector_records(vector_store: BaseVectorStore) -> list[VectorRecord]:
+    """Return vector records when supported by the backing store."""
+    records = getattr(vector_store, "records", None)
+    if isinstance(records, list):
+        return list(records)
+    collection = getattr(vector_store, "collection", None)
+    if collection is None:
+        return []
+    try:
+        response = collection.get(include=["documents", "metadatas", "embeddings"])
+    except Exception:
+        return []
+    return [
+        VectorRecord(
+            id=str(record_id),
+            text=str(document or ""),
+            embedding=list(embedding or []),
+            metadata=dict(metadata or {}),
+        )
+        for record_id, document, metadata, embedding in zip(
+            response.get("ids", []),
+            response.get("documents", []),
+            response.get("metadatas", []),
+            response.get("embeddings", []),
+        )
+    ]
+
+
+def _last_index_update(records: list[VectorRecord]) -> str:
+    """Return the latest vector record creation time for display."""
+    if not records:
+        return INDEX_UNKNOWN_VALUE
+    return max(record.created_at for record in records).isoformat()
+
+
+def _index_search_row(result: SearchResult) -> str:
+    """Return one CLI search result row."""
+    metadata = result.record.metadata
+    preview = NEWLINE.join(result.record.text.splitlines()[:INDEX_PREVIEW_LINES])
+    return INDEX_SEARCH_TEMPLATE.format(
+        file_path=metadata.get(PAYLOAD_KEY_FILE_PATH, INDEX_UNKNOWN_VALUE),
+        name=metadata.get("name", INDEX_UNKNOWN_VALUE),
+        score=result.similarity_score,
+        preview=preview,
     )
 
 

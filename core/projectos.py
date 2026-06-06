@@ -35,6 +35,18 @@ from core.evaluation.schema_validator import DEFAULT_SCHEMAS, SchemaValidator
 from core.evaluation.static_analyzer import StaticAnalyzer
 from core.events import AgentEvent, AgentResult
 from core.git_manager import GitManager
+from core.intelligence.code_indexer import CodeIndexer, IndexingReport
+from core.intelligence.collaboration import COLLABORATION_LOG_NAME, CollaborationBroker
+from core.intelligence.context_retriever import ContextRetriever
+from core.intelligence.embedder import EmbedderFactory
+from core.intelligence.memory_manager import MemoryManager
+from core.intelligence.memory_store import MemoryStore
+from core.intelligence.semantic_router import (
+    ROUTING_DECISIONS_FILE_NAME,
+    ROUTING_EXAMPLES_COLLECTION,
+    SemanticRouter,
+)
+from core.intelligence.vector_store import VectorStoreFactory
 from core.model_provider import GeminiProvider, OllamaProvider, OpenRouterProvider
 from core.persistence import PersistenceManager
 from core.project_config import ProjectConfig, ProjectRegistry
@@ -100,6 +112,11 @@ STATUS_KEY_ROOT_PATH = "root_path"
 STATUS_KEY_PENDING_COUNT = "pending_count"
 STATUS_KEY_BLOCKED_COUNT = "blocked_count"
 STATUS_KEY_PROVIDERS = "providers"
+CODE_INDEX_COLLECTION_NAME = "code_index"
+INDEXING_LOG_TEMPLATE = (
+    "Code index built: {files} files, {chunks} chunks, {duration_ms} ms"
+)
+MEMORY_STATS_LOG_TEMPLATE = "Memory stats for {agent_name}: {total_records} records"
 
 ProviderFactory = Callable[[str, Path], Any]
 
@@ -171,10 +188,38 @@ class ProjectOS:
         )
         self.git_manager = self._initialize_git_manager()
         self.agent_registry = AgentRegistry()
+        self.collaboration_broker = CollaborationBroker(
+            self.agent_registry,
+            self.state_dir / COLLABORATION_LOG_NAME,
+        )
         self.event_queue: queue.Queue[AgentEvent] = queue.Queue()
         self.stop_event = threading.Event()
         self.safety_policy = DefaultSafetyPolicy(self.project_root)
         self.persistence_manager = PersistenceManager(self.state_dir)
+        self.embedder = EmbedderFactory.create(self.state_dir)
+        self.vector_store = VectorStoreFactory.create(
+            CODE_INDEX_COLLECTION_NAME,
+            self.state_dir,
+            self.embedder,
+        )
+        self.routing_vector_store = VectorStoreFactory.create(
+            ROUTING_EXAMPLES_COLLECTION,
+            self.state_dir,
+            self.embedder,
+        )
+        self.code_indexer = CodeIndexer(self.vector_store, self.embedder)
+        self.context_retriever = ContextRetriever(self.vector_store, self.embedder)
+        self.semantic_router = SemanticRouter(
+            self.embedder,
+            self.routing_vector_store,
+            log_path=self.state_dir / ROUTING_DECISIONS_FILE_NAME,
+        )
+        self.memory_store = MemoryStore(
+            VectorStoreFactory.create,
+            self.embedder,
+            self.state_dir,
+        )
+        self.memory_manager = MemoryManager(self.memory_store, self.embedder)
         self.evaluation_store = EvaluationStore(self.state_dir)
         self.static_analyzer = StaticAnalyzer()
         self.quality_scorer = QualityScorer(
@@ -204,6 +249,7 @@ class ProjectOS:
             self.event_queue,
             watch_patterns=self.watch_patterns,
             ignore_patterns=self.ignore_patterns,
+            code_indexer=self.code_indexer,
         )
         self._event_thread: Optional[threading.Thread] = None
 
@@ -229,6 +275,8 @@ class ProjectOS:
         if self._event_thread is not None and self._event_thread.is_alive():
             return
         self.stop_event.clear()
+        self._build_code_index()
+        self._log_memory_stats()
         self._restore_persisted_queue_state()
         self.provider_health_monitor.start()
         self.trigger_system.start()
@@ -271,6 +319,33 @@ class ProjectOS:
         self.clone_agent.process_agent_result(result)
         for next_event in result.next_events:
             self.clone_agent.handle(next_event)
+
+    def _build_code_index(self) -> IndexingReport:
+        """Rebuild the project code index and log the report."""
+        self.code_indexer.clear()
+        report = self.code_indexer.index_directory(self.project_root)
+        self.logger.info(
+            INDEXING_LOG_TEMPLATE.format(
+                files=report.files_indexed,
+                chunks=report.chunks_created,
+                duration_ms=report.duration_ms,
+            )
+        )
+        return report
+
+    def _log_memory_stats(self) -> None:
+        """Log memory counts for agents with stored memories."""
+        for agent_name in ALL_AGENT_NAMES:
+            stats = self.memory_store.get_stats(agent_name)
+            total_records = int(stats.get("total_records", 0))
+            if total_records <= 0:
+                continue
+            self.logger.info(
+                MEMORY_STATS_LOG_TEMPLATE.format(
+                    agent_name=agent_name,
+                    total_records=total_records,
+                )
+            )
 
     def _restore_persisted_queue_state(self) -> None:
         """Restore durable pending and blocked queue items."""
@@ -332,6 +407,9 @@ class ProjectOS:
                 self.providers[AGENT_PLANNING],
                 logger,
                 project_root=self.project_root,
+                context_retriever=self.context_retriever,
+                memory_manager=self.memory_manager,
+                collaboration_broker=self.collaboration_broker,
             ),
             AGENT_CODE_WRITING: CodeWritingAgent(
                 self.providers[AGENT_CODE_WRITING],
@@ -339,27 +417,39 @@ class ProjectOS:
                 project_root=self.project_root,
                 safety_policy=self.safety_policy,
                 static_analyzer=self.static_analyzer,
+                context_retriever=self.context_retriever,
+                memory_manager=self.memory_manager,
+                collaboration_broker=self.collaboration_broker,
             ),
             AGENT_CODE_REVIEW: CodeReviewAgent(
                 self.providers[AGENT_CODE_REVIEW],
                 logger,
                 project_root=self.project_root,
                 git_manager=self.git_manager,
+                context_retriever=self.context_retriever,
+                memory_manager=self.memory_manager,
+                collaboration_broker=self.collaboration_broker,
             ),
             AGENT_ARCHITECTURE: ArchitectureAgent(
                 self.providers[AGENT_ARCHITECTURE],
                 logger,
                 project_root=self.project_root,
+                memory_manager=self.memory_manager,
+                collaboration_broker=self.collaboration_broker,
             ),
             AGENT_TEST: TestAgent(
                 self.providers[AGENT_TEST],
                 logger,
                 project_root=self.project_root,
+                memory_manager=self.memory_manager,
+                collaboration_broker=self.collaboration_broker,
             ),
             AGENT_DOCS: DocsAgent(
                 self.providers[AGENT_DOCS],
                 logger,
                 project_root=self.project_root,
+                memory_manager=self.memory_manager,
+                collaboration_broker=self.collaboration_broker,
             ),
         }
         for agent_name, agent_instance in worker_agents.items():
@@ -375,6 +465,9 @@ class ProjectOS:
             regression_detector=self.regression_detector,
             evaluation_store=self.evaluation_store,
             quality_gate=self.quality_gate,
+            memory_manager=self.memory_manager,
+            semantic_router=self.semantic_router,
+            collaboration_broker=self.collaboration_broker,
         )
         self._register_agent_with_alias(AGENT_CLONE, clone_agent)
         return clone_agent

@@ -10,11 +10,15 @@ import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Mapping, Optional, Sequence
+from typing import Any, List, Mapping, Optional, Sequence, TYPE_CHECKING
 
 from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
+
+if TYPE_CHECKING:
+    from core.intelligence.collaboration import CollaborationBroker
+    from core.intelligence.memory_manager import MemoryManager
 
 
 AGENT_NAME = "architecture"
@@ -166,9 +170,18 @@ class ArchitectureAgent(BaseAgent):
         model_provider: ModelProvider,
         logger: logging.Logger,
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
+        memory_manager: Optional["MemoryManager"] = None,
+        collaboration_broker: Optional["CollaborationBroker"] = None,
     ) -> None:
         """Initialize ArchitectureAgent with model access and project paths."""
-        super().__init__(AGENT_NAME, ROLE_DESCRIPTION, model_provider, logger)
+        super().__init__(
+            AGENT_NAME,
+            ROLE_DESCRIPTION,
+            model_provider,
+            logger,
+            memory_manager=memory_manager,
+            collaboration_broker=collaboration_broker,
+        )
         self.project_root = Path(project_root)
 
     def handle(self, event: AgentEvent) -> AgentResult:
