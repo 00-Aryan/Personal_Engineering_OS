@@ -1,18 +1,21 @@
 # ProjectOS Phase Registry
 
-## Completed
-- Phase 1: Core Architecture (TASK_01–10) ✅
-- Phase 2: Open Source Prep (TASK_11–20) ✅  
-- Phase 3: Evaluation & Quality (TASK_21–26) ✅
-- Phase 4: Agent Intelligence (TASK_27–32) ✅
-- Phase 5: Production Observability (TASK_33–38) — IN PROGRESS
+## END GOAL
+A developer tool that autonomous engineers a software project while you study.
+Open-source. Installable. Used by real developers.
 
-## Planned
-- Phase 6: Agent Memory Distillation (TASK_39–44) — PENDING
-- Phase 7: Multi-Model Optimization (TASK_45–50) — PENDING
-- Phase 8: ProductOS as a Service (TASK_51–56) — PENDING
+## STATUS
 
-## Adding New Phases
-New phase task files are written by Claude after Phase N-1 closes.
-To request: share TASK_[last]_RESULT.md + run bash scripts/share_results.sh
-Claude audits → writes bootstrap prompt → paste into AGY → done.
+Phase 1-4:  Foundation + Intelligence     COMPLETE  (TASK_01–32)
+Phase 5:    Production Observability      IN PROGRESS (TASK_33–38)
+Phase 6:    Real-World Validation         PENDING (TASK_39–44)
+Phase 7:    Developer Experience          PENDING (TASK_45–49)
+Phase 8:    Open Source Launch            PENDING (TASK_50–53)
+
+## DECISION POINT after Phase 8
+Stop here: personal tool + strong portfolio project
+Continue:  Phase 9 (SaaS/product) — only if real users want it
+
+## RULE
+No new phases added without closing the current one.
+No features added that don't serve the end goal above.
