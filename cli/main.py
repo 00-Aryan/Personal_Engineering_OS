@@ -28,6 +28,11 @@ from core.evaluation.quality_scorer import QualityScorer
 from core.evaluation.regression_detector import RegressionDetector
 from core.evaluation.static_analyzer import StaticAnalyzer
 from core.events import AgentEvent, AgentResult, EventType
+from core.observability.tracer import TraceStore, SpanStatus, Span
+from core.observability.token_budget import TokenBudget
+from core.observability.cost_tracker import CostTracker
+from core.observability.alerting import AlertManager, AlertSeverity
+
 from core.intelligence.code_indexer import CodeIndexer
 from core.intelligence.collaboration import COLLABORATION_LOG_NAME, CollaborationBroker
 from core.intelligence.embedder import EmbedderFactory
@@ -288,6 +293,17 @@ def status(ctx: click.Context) -> None:
     for provider_name, healthy in _provider_health(config, persisted_status).items():
         label = HEALTHY_VALUE if healthy else UNREACHABLE_VALUE
         click.echo(f"- {provider_name}: {label}")
+    click.echo("Circuit Breakers:")
+    for provider_name in ["gemini", "openrouter", "ollama"]:
+        state_file = project_root / STATE_DIR_PATH / f"circuit_state_{provider_name}.json"
+        state_str = "CLOSED"
+        if state_file.exists():
+            try:
+                state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                state_str = state_data.get("state", "closed").upper()
+            except Exception:
+                pass
+        click.echo(f"- {provider_name}: {state_str}")
     if persisted_status:
         click.echo(
             f"{STATUS_LABEL_LAST_SEEN}: "
@@ -821,7 +837,141 @@ def collab_log(ctx: click.Context, tail: int) -> None:
         click.echo(_collaboration_log_row(record))
 
 
+@cli.group(name="trace")
+def trace_group() -> None:
+    """Manage and view distributed traces."""
+    pass
+
+
+def _trace_store(ctx: click.Context) -> TraceStore:
+    project_root = _project_root(ctx)
+    state_dir = project_root / STATE_DIR_PATH
+    return TraceStore(state_dir)
+
+
+def _build_trace_tree(spans: List[Span]) -> tuple[List[Span], Dict[str, List[Span]]]:
+    from collections import defaultdict
+    children = defaultdict(list)
+    roots = []
+    span_map = {s.span_id: s for s in spans}
+    for s in spans:
+        parent = s.parent_span_id
+        if not parent or parent not in span_map:
+            roots.append(s)
+        else:
+            children[parent].append(s)
+    for pid in children:
+        children[pid].sort(key=lambda s: s.started_at)
+    roots.sort(key=lambda s: s.started_at)
+    return roots, children
+
+
+def _waterfall_row(span: Span, depth: int, trace_start: datetime, trace_end: datetime, bar_width: int = 22) -> str:
+    indent = "  " * depth
+    name = f"{indent}{span.operation_name}"
+    name_str = f"{name:<25}"[:25]
+    total_seconds = (trace_end - trace_start).total_seconds()
+    if total_seconds <= 0:
+        total_seconds = 0.001
+    start_offset = (span.started_at - trace_start).total_seconds()
+    duration = (span.ended_at - span.started_at).total_seconds() if span.ended_at else 0.0
+    start_char = int((start_offset / total_seconds) * bar_width)
+    duration_chars = int((duration / total_seconds) * bar_width)
+    if start_char >= bar_width:
+        start_char = bar_width - 1
+    if start_char + duration_chars > bar_width:
+        duration_chars = bar_width - start_char
+    solid = "█" * max(duration_chars, 1)
+    trailing = "░░" if depth == 0 else "░"
+    bar = " " * start_char + solid + trailing
+    bar_str = f"{bar:<{bar_width + 2}}"
+    dur_ms = span.duration_ms if span.duration_ms is not None else 0
+    status_str = f"[{span.status.value.upper()}]"
+    return f"{name_str} {bar_str} {dur_ms}ms {status_str}"
+
+
+@trace_group.command(name="list")
+@click.pass_context
+def trace_list(ctx: click.Context) -> None:
+    """Show the last 20 traces."""
+    store = _trace_store(ctx)
+    trace_ids = store.load_recent_traces(limit=20)
+    if not trace_ids:
+        click.echo("No traces found.")
+        return
+    click.echo(f"{'trace_id':<12} | {'event_type':<20} | {'duration_ms':<11} | {'span_count':<10} | {'status':<8}")
+    click.echo("-" * 70)
+    for t_id in trace_ids:
+        spans = store.load_trace(t_id)
+        if not spans:
+            continue
+        earliest_start = min(s.started_at for s in spans)
+        finished_ends = [s.ended_at for s in spans if s.ended_at]
+        latest_end = max(finished_ends) if finished_ends else None
+        duration = 0
+        if latest_end:
+            duration = int((latest_end - earliest_start).total_seconds() * 1000)
+        event_type = "unknown"
+        for s in spans:
+            if "event_type" in s.tags:
+                event_type = s.tags["event_type"]
+                break
+        status = "OK"
+        if any(s.status == SpanStatus.ERROR for s in spans):
+            status = "ERROR"
+        elif any(s.status == SpanStatus.TIMEOUT for s in spans):
+            status = "TIMEOUT"
+        short_id = t_id[:8]
+        click.echo(f"{short_id:<12} | {event_type:<20} | {f'{duration}ms':<11} | {len(spans):<10} | {status:<8}")
+
+
+@trace_group.command(name="show")
+@click.argument("trace_id")
+@click.pass_context
+def trace_show(ctx: click.Context, trace_id: str) -> None:
+    """Show a full trace waterfall."""
+    store = _trace_store(ctx)
+    full_trace_id = trace_id
+    if len(trace_id) == 8:
+        recent = store.load_recent_traces(limit=100)
+        matched = [t for t in recent if t.startswith(trace_id)]
+        if matched:
+            full_trace_id = matched[0]
+    spans = store.load_trace(full_trace_id)
+    if not spans:
+        click.echo(f"Trace {trace_id} not found.")
+        return
+    roots, children = _build_trace_tree(spans)
+    trace_start = min(s.started_at for s in spans)
+    finished_ends = [s.ended_at for s in spans if s.ended_at]
+    trace_end = max(finished_ends) if finished_ends else trace_start
+    def print_span(span, depth):
+        click.echo(_waterfall_row(span, depth, trace_start, trace_end))
+        for child in children.get(span.span_id, []):
+            print_span(child, depth + 1)
+    for root in roots:
+        print_span(root, 0)
+
+
+@trace_group.command(name="slow")
+@click.option("--threshold", type=int, default=5000, show_default=True)
+@click.pass_context
+def trace_slow(ctx: click.Context, threshold: int) -> None:
+    """Show traces that took longer than threshold."""
+    store = _trace_store(ctx)
+    slow_traces = store.get_slow_traces(threshold_ms=threshold)
+    if not slow_traces:
+        click.echo(f"No traces found slower than {threshold}ms.")
+        return
+    click.echo(f"{'trace_id':<12} | {'event_type':<20} | {'duration_ms':<11} | {'span_count':<10}")
+    click.echo("-" * 60)
+    for t in slow_traces:
+        short_id = t["trace_id"][:8]
+        click.echo(f"{short_id:<12} | {t['event_type']:<20} | {f'{t['total_duration_ms']}ms':<11} | {t['span_count']:<10}")
+
+
 def _project_root(ctx: click.Context) -> Path:
+
     """Return the active project root from Click context."""
     value = ctx.obj.get("project_root") if ctx.obj else None
     return Path(value) if value is not None else DEFAULT_PROJECT_ROOT
@@ -1001,6 +1151,7 @@ def _dashboard(project_os: ProjectOS) -> Dashboard:
         decision_logger=DecisionLogger(project_os.project_root),
         persistence_manager=project_os.persistence_manager,
         health_monitor=project_os.provider_health_monitor,
+        alert_manager=project_os.alert_manager,
     )
 
 
@@ -1338,5 +1489,418 @@ def _priority_color(line: str) -> Optional[str]:
     return None
 
 
+@cli.group(name="tokens")
+def tokens_group() -> None:
+    """Manage and inspect ProjectOS token budgets and usage."""
+    pass
+
+
+@tokens_group.command(name="usage")
+@click.pass_context
+def tokens_usage(ctx: click.Context) -> None:
+    """Show token usage summary for the last 7 days per agent."""
+    project_root = _project_root(ctx)
+    tb = TokenBudget(project_root / STATE_DIR_PATH)
+
+    config = _load_config(project_root)
+    custom_budgets = {}
+    agents_cfg = config.get("agents", {})
+    for a_name, a_cfg in agents_cfg.items():
+        if isinstance(a_cfg, dict) and "token_budget" in a_cfg:
+            custom_budgets[a_name] = a_cfg["token_budget"]
+    if custom_budgets:
+        tb.budgets.update(custom_budgets)
+
+    summary = tb.get_usage_summary(days=7)
+
+    click.echo("Agent          Today    7-day avg  Daily limit  Status")
+
+    agents_to_show = ["code_review", "code_writing", "planning", "architecture", "test", "docs", "clone"]
+    for agent_name in agents_to_show:
+        today_usage = tb.get_daily_usage(agent_name)
+
+        agent_summary = summary.get(agent_name, {})
+        total_tokens = agent_summary.get("total_tokens", 0)
+        avg_7_days = int(total_tokens / 7)
+
+        agent_budget = tb.budgets.get(agent_name, tb.budgets["default"])
+        daily_limit = agent_budget.get("daily_limit", 50000)
+
+        status_str = "✓ OK" if today_usage <= daily_limit else "✗ Exceeded"
+
+        today_str = f"{today_usage:,}"
+        avg_str = f"{avg_7_days:,}"
+        limit_str = f"{daily_limit:,}"
+
+        click.echo(
+            f"{agent_name:<15}"
+            f"{today_str:<9}"
+            f"{avg_str:<11}"
+            f"{limit_str:<13}"
+            f"{status_str}"
+        )
+
+
+@tokens_group.command(name="budget")
+@click.option("--agent", "agent_name", required=True)
+@click.option("--hard-limit", type=int, required=True)
+@click.pass_context
+def tokens_budget(ctx: click.Context, agent_name: str, hard_limit: int) -> None:
+    """Update hard limit token budget for an agent in config/models.yaml."""
+    project_root = _project_root(ctx)
+    config = _load_config(project_root)
+    agents = config.get("agents", {})
+    if agent_name not in agents:
+        raise click.ClickException(f"Unknown agent: {agent_name}")
+
+    agent_cfg = agents[agent_name]
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+        agents[agent_name] = agent_cfg
+
+    if "token_budget" not in agent_cfg:
+        agent_cfg["token_budget"] = {}
+    agent_cfg["token_budget"]["hard_limit_per_call"] = hard_limit
+
+    _write_config(project_root, config)
+    click.echo(f"Updated budget for {agent_name}: hard_limit_per_call = {hard_limit}")
+
+
+@tokens_group.command(name="reset")
+@click.option("--agent", "agent_name", required=True)
+@click.pass_context
+def tokens_reset(ctx: click.Context, agent_name: str) -> None:
+    """Reset the today token usage counter for an agent."""
+    project_root = _project_root(ctx)
+    tb = TokenBudget(project_root / STATE_DIR_PATH)
+
+    config = _load_config(project_root)
+    agents = config.get("agents", {})
+    if agent_name not in agents and agent_name != "default":
+        raise click.ClickException(f"Unknown agent: {agent_name}")
+
+    tb.reset_agent_usage(agent_name)
+    click.echo(f"Reset daily token counter for {agent_name}")
+
+
+@cli.group(name="cost")
+def cost_group() -> None:
+    """Track and optimize ProjectOS costs and provider economics."""
+    pass
+
+
+@cost_group.command(name="today")
+@click.pass_context
+def cost_today(ctx: click.Context) -> None:
+    """Show today's cost breakdown."""
+    project_root = _project_root(ctx)
+    ct = CostTracker(project_root / STATE_DIR_PATH)
+
+    config = _load_config(project_root)
+    pricing_cfg = config.get("pricing", {})
+    usd_to_inr = float(pricing_cfg.get("usd_to_inr", 83.5))
+    ct.usd_to_inr = usd_to_inr
+
+    custom_catalog = pricing_cfg.get("catalog", None)
+    if custom_catalog:
+        ct = CostTracker(
+            project_root / STATE_DIR_PATH,
+            usd_to_inr=usd_to_inr,
+            pricing_catalog=custom_catalog,
+        )
+
+    daily_cost = ct.get_daily_cost()
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    agent_stats: dict[str, dict[str, Any]] = {}
+    agents_to_show = ["code_review", "code_writing", "planning", "architecture", "test", "docs", "clone"]
+    for agent_name in agents_to_show:
+        agent_stats[agent_name] = {"calls": 0, "tokens": 0, "cost_inr": 0.0, "free_tier": True}
+
+    if ct.log_path.exists():
+        with ct._lock:
+            try:
+                with open(ct.log_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        try:
+                            data = json.loads(line)
+                            t_date = data.get("timestamp", "")[:10]
+                            if t_date == today_str:
+                                agent = data.get("agent_name", "unknown")
+                                if agent in agent_stats:
+                                    agent_stats[agent]["calls"] += 1
+                                    agent_stats[agent]["tokens"] += int(data.get("input_tokens", 0)) + int(data.get("output_tokens", 0))
+                                    agent_stats[agent]["cost_inr"] += float(data.get("cost_inr", 0.0))
+                                    if not bool(data.get("is_free_tier", True)):
+                                        agent_stats[agent]["free_tier"] = False
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+    click.echo("Today's Usage")
+    click.echo("Agent          Calls  Tokens   Cost (₹)  Free Tier")
+    for agent_name in agents_to_show:
+        stats = agent_stats[agent_name]
+        if stats["calls"] > 0:
+            free_str = "✓ Yes" if stats["free_tier"] else "✗ No"
+            tokens_str = f"{stats['tokens']:,}"
+            cost_str = f"₹{stats['cost_inr']:.2f}"
+            click.echo(
+                f"{agent_name:<15}"
+                f"{stats['calls']:<7}"
+                f"{tokens_str:<9}"
+                f"{cost_str:<10}"
+                f"{free_str}"
+            )
+
+    total_inr = daily_cost["total_inr"]
+    proj = ct.get_monthly_projection(days_of_data=7)
+    proj_inr = proj["projected_inr"]
+    click.echo(f"Total: ₹{total_inr:.2f} | Projected monthly: ₹{proj_inr:.2f}")
+
+
+@cost_group.command(name="week")
+@click.pass_context
+def cost_week(ctx: click.Context) -> None:
+    """Show last 7 days breakdown with daily ASCII chart."""
+    project_root = _project_root(ctx)
+    ct = CostTracker(project_root / STATE_DIR_PATH)
+
+    config = _load_config(project_root)
+    pricing_cfg = config.get("pricing", {})
+    usd_to_inr = float(pricing_cfg.get("usd_to_inr", 83.5))
+    ct.usd_to_inr = usd_to_inr
+
+    custom_catalog = pricing_cfg.get("catalog", None)
+    if custom_catalog:
+        ct = CostTracker(
+            project_root / STATE_DIR_PATH,
+            usd_to_inr=usd_to_inr,
+            pricing_catalog=custom_catalog,
+        )
+
+    today = datetime.now(timezone.utc).date()
+    import datetime as dt
+    days = [today - dt.timedelta(days=i) for i in range(6, -1, -1)]
+
+    costs: list[tuple[date, float]] = []
+    for d in days:
+        daily_stats = ct.get_daily_cost(d)
+        costs.append((d, daily_stats["total_inr"]))
+
+    max_cost = max([c[1] for c in costs])
+
+    click.echo("Last 7 Days Usage:")
+    click.echo("Date            Cost (₹)    Chart")
+    for d, cost in costs:
+        bar = ""
+        if max_cost > 0.0:
+            bar_len = int((cost / max_cost) * 20)
+            bar = "#" * bar_len
+        cost_str = f"₹{cost:.2f}"
+        click.echo(f"{d.isoformat()}      {cost_str:<11} {bar}")
+
+
+@cost_group.command(name="optimize")
+@click.pass_context
+def cost_optimize(ctx: click.Context) -> None:
+    """Show model swap recommendations based on usage patterns."""
+    project_root = _project_root(ctx)
+    ct = CostTracker(project_root / STATE_DIR_PATH)
+
+    config = _load_config(project_root)
+    pricing_cfg = config.get("pricing", {})
+    usd_to_inr = float(pricing_cfg.get("usd_to_inr", 83.5))
+    ct.usd_to_inr = usd_to_inr
+
+    custom_catalog = pricing_cfg.get("catalog", None)
+    if custom_catalog:
+        ct = CostTracker(
+            project_root / STATE_DIR_PATH,
+            usd_to_inr=usd_to_inr,
+            pricing_catalog=custom_catalog,
+        )
+
+    agents_to_show = ["code_review", "code_writing", "planning", "architecture", "test", "docs", "clone"]
+    recommendations: list[str] = []
+    for agent_name in agents_to_show:
+        rec = ct.recommend_model_swap(agent_name)
+        if rec:
+            recommendations.append(rec)
+
+    click.echo("Cost Optimization Recommendations")
+    if recommendations:
+        for rec in recommendations:
+            click.echo(f"- {rec}")
+    else:
+        click.echo("All agents are running cost-optimally. No recommendations.")
+
+
+@cli.group(name="reliability")
+def reliability_group() -> None:
+    """Manage and inspect ProjectOS rate limiters and circuit breakers."""
+    pass
+
+
+@reliability_group.command(name="status")
+@click.pass_context
+def reliability_status(ctx: click.Context) -> None:
+    """Show rate limiter and circuit breaker state per provider."""
+    project_root = _project_root(ctx)
+    click.echo("Provider      Circuit    Failures  Last Failure     Rate (req/s)")
+
+    providers = ["gemini", "openrouter", "ollama"]
+    from core.observability.rate_limiter import ProviderRateLimits
+
+    for provider_name in providers:
+        state_file = project_root / STATE_DIR_PATH / f"circuit_state_{provider_name}.json"
+        circuit_state_str = "● CLOSED"
+        failures = 0
+        last_failure_str = "never"
+
+        if state_file.exists():
+            try:
+                state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                state = state_data.get("state", "closed").upper()
+                if state == "OPEN":
+                    circuit_state_str = "○ OPEN"
+                elif state == "HALF_OPEN":
+                    circuit_state_str = "◑ HALF_OPEN"
+                else:
+                    circuit_state_str = "● CLOSED"
+
+                failures = int(state_data.get("failure_count", 0))
+                lf = state_data.get("last_failure_at")
+                if lf:
+                    lf_dt = datetime.fromisoformat(lf)
+                    diff = datetime.now(timezone.utc) - lf_dt
+                    secs = int(diff.total_seconds())
+                    if secs < 60:
+                        last_failure_str = f"{secs}s ago"
+                    elif secs < 3600:
+                        last_failure_str = f"{secs // 60}m ago"
+                    else:
+                        last_failure_str = f"{secs // 3600}h ago"
+            except Exception:
+                pass
+
+        limiter = ProviderRateLimits.get(provider_name)
+        rate = limiter.tokens_per_second if limiter else 2.0
+
+        click.echo(
+            f"{provider_name:<14}"
+            f"{circuit_state_str:<11}"
+            f"{failures:<10}"
+            f"{last_failure_str:<17}"
+            f"{rate:.1f}"
+        )
+
+
+@reliability_group.command(name="reset")
+@click.option("--provider", "provider_name", required=True)
+@click.pass_context
+def reliability_reset(ctx: click.Context, provider_name: str) -> None:
+    """Force circuit breaker reset for a provider."""
+    project_root = _project_root(ctx)
+    from core.observability.circuit_breaker import CircuitBreaker
+
+    cb = CircuitBreaker(provider_name, state_dir=project_root / STATE_DIR_PATH)
+    cb.reset()
+    click.echo(f"Circuit breaker for {provider_name} has been reset to CLOSED.")
+
+
+@cli.group(name="alerts")
+def alerts_group() -> None:
+    """Manage and view observability alerts and anomalies."""
+
+
+@alerts_group.command(name="list")
+@click.option("--all", "show_all", is_flag=True, help="Show last 50 alerts including acknowledged.")
+@click.pass_context
+def alerts_list(ctx: click.Context, show_all: bool) -> None:
+    """Show active alerts or last 50 alerts."""
+    project_root = _project_root(ctx)
+    alert_manager = AlertManager(project_root / STATE_DIR_PATH)
+
+    if show_all:
+        alerts = sorted(alert_manager._alerts, key=lambda a: a.timestamp, reverse=True)[:50]
+    else:
+        alerts = alert_manager.get_active_alerts()
+
+    if not alerts:
+        click.echo("No alerts found.")
+        return
+
+    click.echo("ID | Severity | Type | Title | Status")
+    for alert in alerts:
+        status = "ACKNOWLEDGED" if alert.acknowledged else "ACTIVE"
+        click.echo(
+            f"{alert.alert_id} | {alert.severity.value.upper()} | "
+            f"{alert.alert_type.value} | {alert.title} | {status}"
+        )
+
+
+@alerts_group.command(name="acknowledge")
+@click.argument("alert_id")
+@click.pass_context
+def alerts_acknowledge(ctx: click.Context, alert_id: str) -> None:
+    """Acknowledge one alert by ID."""
+    project_root = _project_root(ctx)
+    alert_manager = AlertManager(project_root / STATE_DIR_PATH)
+    success = alert_manager.acknowledge(alert_id)
+    if success:
+        click.echo(f"Alert {alert_id} acknowledged.")
+    else:
+        raise click.ClickException(f"Alert {alert_id} not found or already acknowledged.")
+
+
+@alerts_group.command(name="acknowledge-all")
+@click.pass_context
+def alerts_acknowledge_all(ctx: click.Context) -> None:
+    """Acknowledge all active alerts."""
+    project_root = _project_root(ctx)
+    alert_manager = AlertManager(project_root / STATE_DIR_PATH)
+    count = alert_manager.acknowledge_all()
+    click.echo(f"Acknowledged {count} active alerts.")
+
+
+@alerts_group.command(name="anomalies")
+@click.pass_context
+def alerts_anomalies(ctx: click.Context) -> None:
+    """Run anomaly detection right now and show results."""
+    project_root = _project_root(ctx)
+    from core.observability.anomaly_detector import AnomalyDetector
+    detector = AnomalyDetector(project_root / STATE_DIR_PATH)
+
+    click.echo("Running anomaly detection...")
+    agents = ["clone", "planning", "code_writing", "code_review", "architecture", "test", "docs"]
+    found_any = False
+
+    for agent in agents:
+        for check_name, check_fn in [
+            ("Latency", detector.check_latency_anomaly),
+            ("Token Usage", detector.check_token_anomaly),
+            ("Gate Block Rate", detector.check_gate_block_anomaly),
+        ]:
+            try:
+                res = check_fn(agent)
+                if res.is_anomaly:
+                    found_any = True
+                    click.secho(
+                        f"⚠️  ANOMALY DETECTED: {agent} {check_name} | "
+                        f"value: {res.current_value:.1f} (mean: {res.mean:.1f}, "
+                        f"z-score: {res.z_score:.2f})",
+                        fg="yellow",
+                    )
+            except Exception as e:
+                click.echo(f"Error checking {agent} {check_name}: {e}")
+
+    if not found_any:
+        click.secho("✓ No anomalies detected.", fg="green")
+
+
 if __name__ == "__main__":
     cli()
+

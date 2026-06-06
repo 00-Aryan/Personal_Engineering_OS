@@ -4,15 +4,52 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Mapping, Optional
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional, TYPE_CHECKING
 from urllib.parse import quote, urlparse
 
 import requests
 import yaml
 
 from core.retry import with_retry
+from core.observability.token_budget import _local
+from core.observability.circuit_breaker import CircuitOpenError
+
+if TYPE_CHECKING:
+    from core.observability.token_budget import TokenBudget
+
+
+def _write_atomically(path: Path, content: str) -> None:
+    """Write content to a path by replacing it with a temporary file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(
+            file_descriptor,
+            "w",
+            encoding="utf-8",
+        ) as temporary_file:
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_name, path)
+    except Exception:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+        raise
+
+
+def _append_atomically(path: Path, content: str) -> None:
+    """Append content to a file while preserving existing content."""
+    existing_content = path.read_text(encoding="utf-8") if path.exists() else ""
+    _write_atomically(path, f"{existing_content}{content}")
 
 
 CONFIG_KEY_AGENTS = "agents"
@@ -53,6 +90,11 @@ class ModelProvider(ABC):
         self,
         agent_name: Optional[str] = None,
         config_path: Optional[Path | str] = None,
+        token_budget: Optional[TokenBudget] = None,
+        cost_tracker: Optional[Any] = None,
+        rate_limiter: Optional[Any] = None,
+        circuit_breaker: Optional[Any] = None,
+        fallback_router: Optional[Any] = None,
     ) -> None:
         """Load provider and model configuration for an optional agent."""
         self._config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
@@ -60,6 +102,18 @@ class ModelProvider(ABC):
         self._agent_name = agent_name
         self._provider_config = self._load_provider_config()
         self._model_name = self._load_model_name()
+        self.token_budget = token_budget
+        self.cost_tracker = cost_tracker
+        self.rate_limiter = rate_limiter
+        self.circuit_breaker = circuit_breaker
+        self.fallback_router = fallback_router
+
+    def _project_root(self) -> Path:
+        """Return project root based on config path."""
+        resolved_path = self._config_path.resolve()
+        if resolved_path.parent.name == "config":
+            return resolved_path.parent.parent
+        return Path.cwd()
 
     @abstractmethod
     def complete(
@@ -67,6 +121,10 @@ class ModelProvider(ABC):
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        agent_name: Optional[str] = None,
+        token_budget: Optional[TokenBudget] = None,
+        rate_limiter: Optional[Any] = None,
+        circuit_breaker: Optional[Any] = None,
     ) -> str:
         """Return a complete model response for the provided prompt."""
 
@@ -202,13 +260,110 @@ class OpenRouterProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        agent_name: Optional[str] = None,
+        token_budget: Optional[TokenBudget] = None,
+        rate_limiter: Optional[Any] = None,
+        circuit_breaker: Optional[Any] = None,
     ) -> str:
         """Return a complete response from OpenRouter."""
-        return str(
-            self._with_retry(
+        tb = token_budget or getattr(self, "token_budget", None)
+        a_name = agent_name or self._agent_name or "default"
+        if tb:
+            if not hasattr(_local, "last_provider"):
+                _local.last_provider = {}
+            _local.last_provider[a_name] = self.provider_key
+            if not hasattr(_local, "last_model"):
+                _local.last_model = {}
+            _local.last_model[a_name] = self.get_model_name()
+
+            check = tb.check_and_record(a_name, prompt + system_prompt)
+            if check.hard_limit_exceeded:
+                return f"TOKEN_BUDGET_EXCEEDED: {check.warning_message}"
+            if check.soft_limit_exceeded:
+                log_path = self._project_root() / "decisions.log"
+                _append_atomically(log_path, f"[model_provider] {check.warning_message}\n")
+
+        # 1. Rate limiter check
+        rl = rate_limiter or getattr(self, "rate_limiter", None)
+        if rl:
+            estimated_tokens = len(prompt + system_prompt) // 4
+            acquired = rl.acquire(tokens=estimated_tokens)
+            if not acquired:
+                import logging
+                logging.getLogger("projectos.model_provider").warning(
+                    f"Rate limit timeout acquiring {estimated_tokens} tokens for {self.provider_key}"
+                )
+                return "RATE_LIMIT_ERROR"
+
+        # 2. Circuit breaker check
+        cb = circuit_breaker or getattr(self, "circuit_breaker", None)
+        def make_call():
+            return self._with_retry(
                 lambda: self._complete_once(prompt, system_prompt, max_tokens)
             )
-        )
+
+        try:
+            if cb:
+                result = str(cb.call(make_call))
+            else:
+                result = str(make_call())
+        except CircuitOpenError as e:
+            import logging
+            logging.getLogger("projectos.model_provider").warning(
+                f"Circuit open for provider {self.provider_key}: {e}"
+            )
+            fr = getattr(self, "fallback_router", None)
+            if fr and not getattr(_local, "in_fallback", False):
+                if not hasattr(_local, "in_fallback"):
+                    _local.in_fallback = False
+                _local.in_fallback = True
+                try:
+                    return fr.complete(
+                        prompt,
+                        system_prompt,
+                        max_tokens,
+                        agent_name=agent_name,
+                        token_budget=token_budget,
+                        rate_limiter=rate_limiter,
+                        circuit_breaker=circuit_breaker,
+                    )
+                finally:
+                    _local.in_fallback = False
+            
+            if getattr(_local, "in_fallback", False):
+                raise e
+            return "CIRCUIT_OPEN_ERROR"
+
+        if result in ("RATE_LIMIT_ERROR", "CIRCUIT_OPEN_ERROR"):
+            return result
+
+        record = None
+        if tb:
+            record = tb.record_completion(a_name, result)
+
+        ct = getattr(self, "cost_tracker", None)
+        if ct:
+            task_id = getattr(_local, "current_task_id", None)
+            trace_id = None
+            if getattr(self, "tracer", None):
+                try:
+                    with self.tracer._lock:
+                        trace_id = self.tracer._event_to_trace.get(task_id)
+                except Exception:
+                    pass
+            prompt_tokens = record.prompt_tokens if record else len(prompt + system_prompt) // 4
+            completion_tokens = record.completion_tokens if record else len(result) // 4
+            ct.record(
+                agent_name=a_name,
+                provider=self.provider_key,
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
+                trace_id=trace_id,
+                task_id=task_id,
+                model=self.get_model_name(),
+            )
+
+        return result
 
     def stream(self, prompt: str, system_prompt: str) -> Iterator[str]:
         """Yield streamed response fragments from OpenRouter."""
@@ -305,13 +460,110 @@ class GeminiProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        agent_name: Optional[str] = None,
+        token_budget: Optional[TokenBudget] = None,
+        rate_limiter: Optional[Any] = None,
+        circuit_breaker: Optional[Any] = None,
     ) -> str:
         """Return a complete response from Gemini."""
-        return str(
-            self._with_retry(
+        tb = token_budget or getattr(self, "token_budget", None)
+        a_name = agent_name or self._agent_name or "default"
+        if tb:
+            if not hasattr(_local, "last_provider"):
+                _local.last_provider = {}
+            _local.last_provider[a_name] = self.provider_key
+            if not hasattr(_local, "last_model"):
+                _local.last_model = {}
+            _local.last_model[a_name] = self.get_model_name()
+
+            check = tb.check_and_record(a_name, prompt + system_prompt)
+            if check.hard_limit_exceeded:
+                return f"TOKEN_BUDGET_EXCEEDED: {check.warning_message}"
+            if check.soft_limit_exceeded:
+                log_path = self._project_root() / "decisions.log"
+                _append_atomically(log_path, f"[model_provider] {check.warning_message}\n")
+
+        # 1. Rate limiter check
+        rl = rate_limiter or getattr(self, "rate_limiter", None)
+        if rl:
+            estimated_tokens = len(prompt + system_prompt) // 4
+            acquired = rl.acquire(tokens=estimated_tokens)
+            if not acquired:
+                import logging
+                logging.getLogger("projectos.model_provider").warning(
+                    f"Rate limit timeout acquiring {estimated_tokens} tokens for {self.provider_key}"
+                )
+                return "RATE_LIMIT_ERROR"
+
+        # 2. Circuit breaker check
+        cb = circuit_breaker or getattr(self, "circuit_breaker", None)
+        def make_call():
+            return self._with_retry(
                 lambda: self._complete_once(prompt, system_prompt, max_tokens)
             )
-        )
+
+        try:
+            if cb:
+                result = str(cb.call(make_call))
+            else:
+                result = str(make_call())
+        except CircuitOpenError as e:
+            import logging
+            logging.getLogger("projectos.model_provider").warning(
+                f"Circuit open for provider {self.provider_key}: {e}"
+            )
+            fr = getattr(self, "fallback_router", None)
+            if fr and not getattr(_local, "in_fallback", False):
+                if not hasattr(_local, "in_fallback"):
+                    _local.in_fallback = False
+                _local.in_fallback = True
+                try:
+                    return fr.complete(
+                        prompt,
+                        system_prompt,
+                        max_tokens,
+                        agent_name=agent_name,
+                        token_budget=token_budget,
+                        rate_limiter=rate_limiter,
+                        circuit_breaker=circuit_breaker,
+                    )
+                finally:
+                    _local.in_fallback = False
+            
+            if getattr(_local, "in_fallback", False):
+                raise e
+            return "CIRCUIT_OPEN_ERROR"
+
+        if result in ("RATE_LIMIT_ERROR", "CIRCUIT_OPEN_ERROR"):
+            return result
+
+        record = None
+        if tb:
+            record = tb.record_completion(a_name, result)
+
+        ct = getattr(self, "cost_tracker", None)
+        if ct:
+            task_id = getattr(_local, "current_task_id", None)
+            trace_id = None
+            if getattr(self, "tracer", None):
+                try:
+                    with self.tracer._lock:
+                        trace_id = self.tracer._event_to_trace.get(task_id)
+                except Exception:
+                    pass
+            prompt_tokens = record.prompt_tokens if record else len(prompt + system_prompt) // 4
+            completion_tokens = record.completion_tokens if record else len(result) // 4
+            ct.record(
+                agent_name=a_name,
+                provider=self.provider_key,
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
+                trace_id=trace_id,
+                task_id=task_id,
+                model=self.get_model_name(),
+            )
+
+        return result
 
     def stream(self, prompt: str, system_prompt: str) -> Iterator[str]:
         """Yield streamed response fragments from Gemini."""
@@ -404,13 +656,110 @@ class OllamaProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        agent_name: Optional[str] = None,
+        token_budget: Optional[TokenBudget] = None,
+        rate_limiter: Optional[Any] = None,
+        circuit_breaker: Optional[Any] = None,
     ) -> str:
         """Return a complete response from Ollama."""
-        return str(
-            self._with_retry(
+        tb = token_budget or getattr(self, "token_budget", None)
+        a_name = agent_name or self._agent_name or "default"
+        if tb:
+            if not hasattr(_local, "last_provider"):
+                _local.last_provider = {}
+            _local.last_provider[a_name] = self.provider_key
+            if not hasattr(_local, "last_model"):
+                _local.last_model = {}
+            _local.last_model[a_name] = self.get_model_name()
+
+            check = tb.check_and_record(a_name, prompt + system_prompt)
+            if check.hard_limit_exceeded:
+                return f"TOKEN_BUDGET_EXCEEDED: {check.warning_message}"
+            if check.soft_limit_exceeded:
+                log_path = self._project_root() / "decisions.log"
+                _append_atomically(log_path, f"[model_provider] {check.warning_message}\n")
+
+        # 1. Rate limiter check
+        rl = rate_limiter or getattr(self, "rate_limiter", None)
+        if rl:
+            estimated_tokens = len(prompt + system_prompt) // 4
+            acquired = rl.acquire(tokens=estimated_tokens)
+            if not acquired:
+                import logging
+                logging.getLogger("projectos.model_provider").warning(
+                    f"Rate limit timeout acquiring {estimated_tokens} tokens for {self.provider_key}"
+                )
+                return "RATE_LIMIT_ERROR"
+
+        # 2. Circuit breaker check
+        cb = circuit_breaker or getattr(self, "circuit_breaker", None)
+        def make_call():
+            return self._with_retry(
                 lambda: self._complete_once(prompt, system_prompt, max_tokens)
             )
-        )
+
+        try:
+            if cb:
+                result = str(cb.call(make_call))
+            else:
+                result = str(make_call())
+        except CircuitOpenError as e:
+            import logging
+            logging.getLogger("projectos.model_provider").warning(
+                f"Circuit open for provider {self.provider_key}: {e}"
+            )
+            fr = getattr(self, "fallback_router", None)
+            if fr and not getattr(_local, "in_fallback", False):
+                if not hasattr(_local, "in_fallback"):
+                    _local.in_fallback = False
+                _local.in_fallback = True
+                try:
+                    return fr.complete(
+                        prompt,
+                        system_prompt,
+                        max_tokens,
+                        agent_name=agent_name,
+                        token_budget=token_budget,
+                        rate_limiter=rate_limiter,
+                        circuit_breaker=circuit_breaker,
+                    )
+                finally:
+                    _local.in_fallback = False
+            
+            if getattr(_local, "in_fallback", False):
+                raise e
+            return "CIRCUIT_OPEN_ERROR"
+
+        if result in ("RATE_LIMIT_ERROR", "CIRCUIT_OPEN_ERROR"):
+            return result
+
+        record = None
+        if tb:
+            record = tb.record_completion(a_name, result)
+
+        ct = getattr(self, "cost_tracker", None)
+        if ct:
+            task_id = getattr(_local, "current_task_id", None)
+            trace_id = None
+            if getattr(self, "tracer", None):
+                try:
+                    with self.tracer._lock:
+                        trace_id = self.tracer._event_to_trace.get(task_id)
+                except Exception:
+                    pass
+            prompt_tokens = record.prompt_tokens if record else len(prompt + system_prompt) // 4
+            completion_tokens = record.completion_tokens if record else len(result) // 4
+            ct.record(
+                agent_name=a_name,
+                provider=self.provider_key,
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
+                trace_id=trace_id,
+                task_id=task_id,
+                model=self.get_model_name(),
+            )
+
+        return result
 
     def stream(self, prompt: str, system_prompt: str) -> Iterator[str]:
         """Yield streamed response fragments from Ollama."""

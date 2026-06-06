@@ -40,6 +40,8 @@ class FakeProvider:
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        *args: Any,
+        **kwargs: Any,
     ) -> str:
         """Return an unused completion value."""
         return ""

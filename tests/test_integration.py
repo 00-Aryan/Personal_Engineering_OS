@@ -263,6 +263,8 @@ class MockModelProvider:
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        agent_name: str | None = None,
+        token_budget: Any = None,
     ) -> str:
         """Return deterministic model output for one agent."""
         self.calls.append((prompt, system_prompt, max_tokens))

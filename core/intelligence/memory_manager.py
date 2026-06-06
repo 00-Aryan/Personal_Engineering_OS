@@ -10,6 +10,8 @@ from core.evaluation.base_evaluator import EvaluationResult
 from core.events import AgentResult
 from core.intelligence.embedder import BaseEmbedder
 from core.intelligence.memory_store import MemoryRecord, MemoryStore, MemoryType
+from core.observability.tracer import Tracer, SpanStatus
+
 
 
 EXPERIENCE_HEADER = "--- RELEVANT PAST EXPERIENCE ---"
@@ -38,10 +40,12 @@ class MemoryManager:
         self,
         memory_store: MemoryStore,
         embedder: BaseEmbedder,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         """Initialize the manager with persistent memory storage."""
         self.memory_store = memory_store
         self.embedder = embedder
+        self.tracer = tracer
 
     def remember_decision(
         self,
@@ -117,14 +121,26 @@ class MemoryManager:
         k: int = DEFAULT_RECALL_K,
     ) -> str:
         """Return formatted memories relevant to one agent query."""
-        memories = self.memory_store.retrieve(query, agent_name, k=k)
-        if not memories:
-            return ""
-        return NEWLINE.join(
-            [EXPERIENCE_HEADER]
-            + [memory.to_retrieval_text() for memory in memories]
-            + [EXPERIENCE_FOOTER]
-        )
+        span = self.tracer.start_span("memory.recall", component="memory_manager") if self.tracer else None
+        try:
+            memories = self.memory_store.retrieve(query, agent_name, k=k)
+            if span:
+                span.tags.update({
+                    "memories_retrieved": len(memories),
+                    "agent_name": agent_name
+                })
+                span.finish(SpanStatus.OK)
+            if not memories:
+                return ""
+            return NEWLINE.join(
+                [EXPERIENCE_HEADER]
+                + [memory.to_retrieval_text() for memory in memories]
+                + [EXPERIENCE_FOOTER]
+            )
+        except Exception as e:
+            if span:
+                span.finish(SpanStatus.ERROR, error=str(e))
+            raise
 
     def learn_from_evaluation(
         self,

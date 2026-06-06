@@ -15,6 +15,8 @@ from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventType
 from core.git_manager import GitManager
 from core.model_provider import ModelProvider
+from core.observability.tracer import Tracer, SpanStatus
+
 
 if TYPE_CHECKING:
     from core.intelligence.collaboration import CollaborationBroker
@@ -228,6 +230,7 @@ class CodeReviewAgent(BaseAgent):
         context_retriever: Optional["ContextRetriever"] = None,
         memory_manager: Optional["MemoryManager"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         """Initialize CodeReviewAgent with model access and review paths."""
         super().__init__(
@@ -241,72 +244,98 @@ class CodeReviewAgent(BaseAgent):
         )
         self.project_root = Path(project_root)
         self.git_manager = git_manager
+        self.tracer = tracer
         self._ensure_reviews_dir()
 
     def handle(self, event: AgentEvent) -> AgentResult:
         """Review a changed or written code file."""
-        if event.event_type not in (EventType.CODE_WRITTEN, EventType.CODE_CHANGED):
-            return self._failure_result(event, DECISION_REASON_UNSUPPORTED_EVENT)
-
         file_path_value = self._file_path_value(event.payload)
-        if not file_path_value:
-            return self._failure_result(event, DECISION_REASON_MISSING_PAYLOAD)
-
-        file_path = self._resolve_path(file_path_value)
-        if not file_path.exists():
-            return self._failure_result(event, DECISION_REASON_FILE_NOT_FOUND)
-
-        code = file_path.read_text(encoding=ENCODING)
-        task_id = self._task_id(event.payload)
-        memories = self.recall_relevant(query=f"review {file_path}", k=3)
-        context = self.get_context(
-            task_description=self._task_description(event.payload),
-            file_path=str(file_path),
-        )
-        prompt = self._build_prompt(file_path, task_id, code)
-        model_output = self.model_provider.complete(
-            prompt,
-            self._system_prompt(context, memories),
-            MODEL_MAX_TOKENS,
-        )
+        span = self.tracer.start_span("code_review.handle", component="code_review",
+            tags={"file_path": str(file_path_value) if file_path_value else "", "agent": self.name}) if self.tracer else None
         try:
-            issues = self.parse_issues(model_output)
-        except ValueError as error:
-            self.logger.error(LOGGER_ERROR_FORMAT, DECISION_REASON_INVALID_JSON, error)
-            return self._failure_result(event, DECISION_REASON_INVALID_JSON)
+            if event.event_type not in (EventType.CODE_WRITTEN, EventType.CODE_CHANGED):
+                res = self._failure_result(event, DECISION_REASON_UNSUPPORTED_EVENT)
+                if span:
+                    span.finish(SpanStatus.OK)
+                return res
 
-        blocker_count = self._blocker_count(issues)
-        report_path = self._write_review_report(file_path, task_id, issues)
-        if task_id:
-            self._update_backlog_task_status(
-                task_id,
-                BACKLOG_STATUS_BLOCKED if blocker_count else BACKLOG_STATUS_DONE,
+            if not file_path_value:
+                res = self._failure_result(event, DECISION_REASON_MISSING_PAYLOAD)
+                if span:
+                    span.finish(SpanStatus.OK)
+                return res
+
+            file_path = self._resolve_path(file_path_value)
+            if span:
+                span.tags["file_path"] = str(file_path)
+
+            if not file_path.exists():
+                res = self._failure_result(event, DECISION_REASON_FILE_NOT_FOUND)
+                if span:
+                    span.finish(SpanStatus.OK)
+                return res
+
+            code = file_path.read_text(encoding=ENCODING)
+            task_id = self._task_id(event.payload)
+            memories = self.recall_relevant(query=f"review {file_path}", k=3)
+            context = self.get_context(
+                task_description=self._task_description(event.payload),
+                file_path=str(file_path),
             )
-        reasoning = DECISION_REASON_REVIEWED_TEMPLATE.format(
-            file_path=str(file_path),
-            total_issues=len(issues),
-            blockers=blocker_count,
-        )
-        self._auto_commit_reviewed_file(file_path, len(issues), blocker_count)
-        self._log_decision(event, DECISION_SUCCESS, reasoning)
-        self.remember(
-            decision=f"Reviewed {file_path}",
-            context=f"File: {file_path}",
-            outcome=f"Found {len(issues)} issues",
-            quality_score=None,
-        )
-        return AgentResult(
-            success=True,
-            output={
-                OUTPUT_KEY_ISSUES: [asdict(issue) for issue in issues],
-                OUTPUT_KEY_REPORT_PATH: str(report_path),
-            },
-            next_events=[
-                self._review_done_event(event, file_path, task_id, issues, report_path)
-            ],
-            escalate=bool(blocker_count),
-            escalation_reason=ESCALATION_REASON_CRITICAL if blocker_count else None,
-        )
+            prompt = self._build_prompt(file_path, task_id, code)
+            model_output = self.model_provider.complete(
+                prompt,
+                self._system_prompt(context, memories),
+                MODEL_MAX_TOKENS,
+            )
+            try:
+                issues = self.parse_issues(model_output)
+            except ValueError as error:
+                self.logger.error(LOGGER_ERROR_FORMAT, DECISION_REASON_INVALID_JSON, error)
+                res = self._failure_result(event, DECISION_REASON_INVALID_JSON)
+                if span:
+                    span.finish(SpanStatus.OK)
+                return res
+
+            blocker_count = self._blocker_count(issues)
+            report_path = self._write_review_report(file_path, task_id, issues)
+            if task_id:
+                self._update_backlog_task_status(
+                    task_id,
+                    BACKLOG_STATUS_BLOCKED if blocker_count else BACKLOG_STATUS_DONE,
+                )
+            reasoning = DECISION_REASON_REVIEWED_TEMPLATE.format(
+                file_path=str(file_path),
+                total_issues=len(issues),
+                blockers=blocker_count,
+            )
+            self._auto_commit_reviewed_file(file_path, len(issues), blocker_count)
+            self._log_decision(event, DECISION_SUCCESS, reasoning)
+            self.remember(
+                decision=f"Reviewed {file_path}",
+                context=f"File: {file_path}",
+                outcome=f"Found {len(issues)} issues",
+                quality_score=None,
+            )
+            res = AgentResult(
+                success=True,
+                output={
+                    OUTPUT_KEY_ISSUES: [asdict(issue) for issue in issues],
+                    OUTPUT_KEY_REPORT_PATH: str(report_path),
+                },
+                next_events=[
+                    self._review_done_event(event, file_path, task_id, issues, report_path)
+                ],
+                escalate=bool(blocker_count),
+                escalation_reason=ESCALATION_REASON_CRITICAL if blocker_count else None,
+            )
+            if span:
+                span.finish(SpanStatus.OK)
+            return res
+        except Exception as e:
+            if span:
+                span.finish(SpanStatus.ERROR, error=str(e))
+            raise
 
     def parse_issues(self, model_output: str) -> List[ReviewIssue]:
         """Parse model JSON output into review issues."""

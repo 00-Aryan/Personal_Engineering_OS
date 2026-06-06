@@ -13,7 +13,6 @@ providers:
     completion_url: http://localhost:11434/api/generate
     stream_url: http://localhost:11434/api/generate
     default_model: ollama-fallback
-
 agents:
   clone:
     provider: gemini
@@ -27,6 +26,8 @@ agents:
   code_review:
     provider: openrouter
     model: openrouter-free
+    token_budget:
+      hard_limit_per_call: 8000
   architecture:
     provider: openrouter
     model: deepseek-v3
@@ -36,12 +37,33 @@ agents:
   docs:
     provider: gemini
     model: gemini-flash
-
 fallback_chain:
-  planning: [deepseek-v3, ollama-deepseek-r1, ollama-llama3]
-  code_writing: [openrouter-free, ollama-codellama, ollama-llama3]
-  code_review: [openrouter-free, ollama-codellama]
-  clone: [gemini-flash, ollama-llama3]
-  test: [openrouter-free, ollama-codellama]
-  docs: [gemini-flash, ollama-llama3]
-  architecture: [deepseek-v3, ollama-deepseek-r1]
+  planning:
+  - deepseek-v3
+  - ollama-deepseek-r1
+  - ollama-llama3
+  code_writing:
+  - openrouter-free
+  - ollama-codellama
+  - ollama-llama3
+  code_review:
+  - openrouter-free
+  - ollama-codellama
+  clone:
+  - gemini-flash
+  - ollama-llama3
+  test:
+  - openrouter-free
+  - ollama-codellama
+  docs:
+  - gemini-flash
+  - ollama-llama3
+  architecture:
+  - deepseek-v3
+  - ollama-deepseek-r1
+
+pricing:
+  usd_to_inr: 83.5
+  alert_threshold_daily_inr: 100
+  alert_threshold_monthly_inr: 2000
+

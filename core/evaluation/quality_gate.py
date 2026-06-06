@@ -22,6 +22,8 @@ from core.evaluation.static_analyzer import (
     StyleMetrics,
 )
 from core.events import AgentResult
+from core.observability.tracer import Tracer, SpanStatus
+
 
 
 ENCODING = "utf-8"
@@ -109,12 +111,14 @@ class QualityGate:
         quality_scorer: QualityScorer,
         regression_detector: RegressionDetector,
         gate_log_path: Path,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         """Initialize quality gate policies, scorers, and log path."""
         self.policies = dict(policies)
         self.quality_scorer = quality_scorer
         self.regression_detector = regression_detector
         self.gate_log_path = Path(gate_log_path)
+        self.tracer = tracer
         self._logger = logging.getLogger(LOGGER_NAME)
 
     def evaluate(
@@ -126,6 +130,7 @@ class QualityGate:
         model_version: Optional[str] = None,
     ) -> GateResult:
         """Evaluate one agent result against configured quality policy."""
+        span = self.tracer.start_span("quality_gate.evaluate", component="quality_gate") if self.tracer else None
         started_at = perf_counter()
         policy = self._policy(agent_name)
         try:
@@ -173,6 +178,12 @@ class QualityGate:
                 policy,
                 started_at,
             )
+            if span:
+                span.tags.update({
+                    "decision": gate_result.decision.value,
+                    "score": gate_result.combined_score
+                })
+                span.finish(SpanStatus.OK)
         except Exception as error:
             warning = WARNING_EVALUATION_FAILED_TEMPLATE.format(error=error)
             self._logger.warning(warning)
@@ -186,6 +197,12 @@ class QualityGate:
                 policy,
                 started_at,
             )
+            if span:
+                span.tags.update({
+                    "decision": gate_result.decision.value,
+                    "score": gate_result.combined_score
+                })
+                span.finish(SpanStatus.ERROR, error=str(error))
         self._append_result(gate_result)
         return gate_result
 

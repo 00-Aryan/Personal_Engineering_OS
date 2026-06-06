@@ -18,6 +18,7 @@ from core.evaluation.static_analyzer import StaticAnalyzer
 from core.persistence import PersistenceManager
 from core.provider_health import ProviderHealthMonitor
 from core.task_queue import TaskQueue
+from core.observability.alerting import AlertManager, AlertSeverity
 
 try:
     from rich.layout import Layout
@@ -169,6 +170,7 @@ class DashboardData:
     quality: tuple[QualityRow, ...]
     queue: QueueSummary
     recent_decisions: tuple[DecisionRow, ...]
+    active_alerts: tuple[Any, ...] = ()
 
 
 class Dashboard:
@@ -184,6 +186,7 @@ class Dashboard:
         evaluation_store: Optional[EvaluationStore] = None,
         quality_gate: Optional[QualityGate] = None,
         regression_detector: Optional[RegressionDetector] = None,
+        alert_manager: Optional[AlertManager] = None,
     ) -> None:
         """Initialize dashboard component references and thread state."""
         self.task_queue = task_queue
@@ -198,6 +201,7 @@ class Dashboard:
             state_dir,
         )
         self.quality_gate = quality_gate or self._default_quality_gate(state_dir)
+        self.alert_manager = alert_manager or AlertManager(state_dir)
         self._started_at = datetime.now(timezone.utc)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -232,6 +236,10 @@ class Dashboard:
         pending_count = self._pending_count()
         blocked_count = self._blocked_count()
         recent_decisions = self._recent_decisions()
+        try:
+            active_alerts = tuple(self.alert_manager.get_active_alerts())
+        except Exception:
+            active_alerts = ()
         return DashboardData(
             status=STATUS_STOPPED if self._stop_event.is_set() else STATUS_RUNNING,
             uptime=self._uptime(),
@@ -244,6 +252,7 @@ class Dashboard:
                 completed_today=self._completed_today(),
             ),
             recent_decisions=recent_decisions,
+            active_alerts=active_alerts,
         )
 
     def render(self) -> Any:
@@ -259,6 +268,11 @@ class Dashboard:
                 size=3,
             ),
             Layout(name=LAYOUT_BODY, ratio=2),
+            Layout(
+                Panel(self._alerts_panel_content(data.active_alerts), title="Active Alerts"),
+                name="alerts",
+                ratio=1,
+            ),
             Layout(
                 Panel(self._queue_text(data.queue), title=TITLE_QUEUE),
                 name=LAYOUT_QUEUE,
@@ -489,6 +503,30 @@ class Dashboard:
             return value[:TIMESTAMP_TIME_LENGTH]
         return parsed.strftime("%H:%M:%S")
 
+    def _alerts_panel_content(self, active_alerts: tuple[Any, ...]) -> str:
+        """Format the active alerts panel content."""
+        if not active_alerts:
+            return "No active alerts.\n\n0 active | projectos alerts acknowledge-all to clear"
+
+        lines = []
+        for alert in active_alerts:
+            if alert.severity == AlertSeverity.CRITICAL:
+                indicator = "🔴 CRITICAL "
+            elif alert.severity == AlertSeverity.WARNING:
+                indicator = "🟡 WARNING  "
+            else:
+                indicator = "🟢 INFO     "
+
+            lines.append(f"{indicator} {alert.title}")
+            if alert.message:
+                msg_lines = alert.message.split("\n")
+                for msg_line in msg_lines:
+                    lines.append(f"             {msg_line}")
+
+        lines.append("")
+        lines.append(f"{len(active_alerts)} active | projectos alerts acknowledge-all to clear")
+        return "\n".join(lines)
+
     def _plain_render(self, data: DashboardData) -> str:
         """Return a plain text dashboard when Rich is unavailable."""
         lines = [
@@ -505,6 +543,9 @@ class Dashboard:
             )
             for row in data.quality
         )
+        lines.append("\nActive Alerts:")
+        lines.append(self._alerts_panel_content(data.active_alerts))
+        lines.append("\nRecent Decisions:")
         lines.extend(
             TEXT_DECISION_TEMPLATE.format(
                 time=decision.timestamp,

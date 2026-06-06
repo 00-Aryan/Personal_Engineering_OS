@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Iterator
+from typing import Any, Iterator
 
 import pytest
 
@@ -38,6 +38,8 @@ class MockModelProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        agent_name: str | None = None,
+        token_budget: Any = None,
     ) -> str:
         """Capture prompt inputs and return the configured response."""
         self.prompts.append(prompt)

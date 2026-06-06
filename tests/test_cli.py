@@ -531,6 +531,149 @@ class CliTestCase(unittest.TestCase):
             encoding=TEST_ENCODING,
         )
 
+    def test_cost_today_command(self) -> None:
+        """Verify cost today command runs and prints output."""
+        costs_path = self.project_root / ".projectos_state" / "costs.jsonl"
+        costs_path.parent.mkdir(parents=True, exist_ok=True)
+        today_str = datetime.now(timezone.utc).date().isoformat()
+
+        record = {
+            "record_id": "cost-1",
+            "timestamp": today_str + "T12:00:00Z",
+            "agent_name": "planning",
+            "provider": "openrouter",
+            "model": "deepseek-v3",
+            "input_tokens": 1000,
+            "output_tokens": 500,
+            "cost_usd": 0.00028,
+            "cost_inr": 0.02338,
+            "is_free_tier": False,
+            "trace_id": None,
+            "task_id": None,
+        }
+        costs_path.write_text(json.dumps(record) + "\n", encoding=TEST_ENCODING)
+
+        result = self.runner.invoke(
+            cli,
+            ["cost", "today"],
+            obj={"project_root": self.project_root},
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Today's Usage", result.output)
+        self.assertIn("planning", result.output)
+        self.assertIn("Total:", result.output)
+
+    def test_cost_week_command(self) -> None:
+        """Verify cost week command runs and prints daily chart."""
+        result = self.runner.invoke(
+            cli,
+            ["cost", "week"],
+            obj={"project_root": self.project_root},
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Last 7 Days Usage", result.output)
+
+    def test_cost_optimize_command(self) -> None:
+        """Verify cost optimize command runs and prints suggestions."""
+        result = self.runner.invoke(
+            cli,
+            ["cost", "optimize"],
+            obj={"project_root": self.project_root},
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Cost Optimization Recommendations", result.output)
+
+    def test_reliability_status_command(self) -> None:
+        """Verify reliability status command displays rate limiters and circuit breaker states."""
+        result = self.runner.invoke(
+            cli,
+            ["reliability", "status"],
+            obj={"project_root": self.project_root},
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("gemini", result.output)
+        self.assertIn("● CLOSED", result.output)
+        self.assertIn("never", result.output)
+
+        state_dir = self.project_root / ".projectos_state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        
+        gemini_state = {
+            "state": "open",
+            "failure_count": 5,
+            "success_count": 0,
+            "last_failure_at": datetime.now(timezone.utc).isoformat(),
+            "last_success_at": None,
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "total_requests": 5,
+            "blocked_requests": 0,
+        }
+        (state_dir / "circuit_state_gemini.json").write_text(
+            json.dumps(gemini_state), encoding=TEST_ENCODING
+        )
+
+        ollama_state = {
+            "state": "half_open",
+            "failure_count": 3,
+            "success_count": 1,
+            "last_failure_at": datetime.now(timezone.utc).isoformat(),
+            "last_success_at": datetime.now(timezone.utc).isoformat(),
+            "opened_at": None,
+            "total_requests": 4,
+            "blocked_requests": 0,
+        }
+        (state_dir / "circuit_state_ollama.json").write_text(
+            json.dumps(ollama_state), encoding=TEST_ENCODING
+        )
+
+        result_with_files = self.runner.invoke(
+            cli,
+            ["reliability", "status"],
+            obj={"project_root": self.project_root},
+        )
+        self.assertEqual(result_with_files.exit_code, 0)
+        self.assertIn("gemini", result_with_files.output)
+        self.assertIn("○ OPEN", result_with_files.output)
+        self.assertIn("5", result_with_files.output)
+        self.assertIn("0s ago", result_with_files.output)
+        
+        self.assertIn("ollama", result_with_files.output)
+        self.assertIn("◑ HALF_OPEN", result_with_files.output)
+
+    def test_reliability_reset_command(self) -> None:
+        """Verify reliability reset command forces the circuit breaker to CLOSED."""
+        state_dir = self.project_root / ".projectos_state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        
+        gemini_state = {
+            "state": "open",
+            "failure_count": 5,
+            "success_count": 0,
+            "last_failure_at": datetime.now(timezone.utc).isoformat(),
+            "last_success_at": None,
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "total_requests": 5,
+            "blocked_requests": 0,
+        }
+        (state_dir / "circuit_state_gemini.json").write_text(
+            json.dumps(gemini_state), encoding=TEST_ENCODING
+        )
+
+        result = self.runner.invoke(
+            cli,
+            ["reliability", "reset", "--provider", "gemini"],
+            obj={"project_root": self.project_root},
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Circuit breaker for gemini has been reset to CLOSED.", result.output)
+        
+        updated_state = json.loads(
+            (state_dir / "circuit_state_gemini.json").read_text(encoding=TEST_ENCODING)
+        )
+        self.assertEqual(updated_state["state"], "closed")
+        self.assertEqual(updated_state["failure_count"], 0)
+
     def _write_collaboration_log(self) -> None:
         """Write minimal collaboration log records for CLI tests."""
         collab_path = self.project_root / COLLAB_LOG_PATH

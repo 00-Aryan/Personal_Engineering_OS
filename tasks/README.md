@@ -43,11 +43,11 @@ Never start a task without reading all existing code first.
 - TASK_32: DONE (phase 4 integration + intelligence smoke - 251 tests green)
 
 ## Phase 5 — Production Observability
-- TASK_33: PENDING
-- TASK_34: PENDING
-- TASK_35: PENDING
-- TASK_36: PENDING
-- TASK_37: PENDING
+- TASK_33: DONE (distributed tracing - 262 tests green)
+- TASK_34: DONE (token budget manager - 272 tests green)
+- TASK_35: DONE (cost tracker - 283 tests green)
+- TASK_36: DONE (rate limiter + circuit breaker - 298 tests green)
+- TASK_37: DONE (alerting + anomaly detection - 309 tests green)
 - TASK_38: PENDING
 
 ## Audit Protocol

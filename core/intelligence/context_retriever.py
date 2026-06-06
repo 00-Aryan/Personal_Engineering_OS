@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 from core.intelligence.code_indexer import (
     CodeChunk,
@@ -13,6 +13,10 @@ from core.intelligence.code_indexer import (
 )
 from core.intelligence.embedder import BaseEmbedder
 from core.intelligence.vector_store import BaseVectorStore, SearchResult, VectorRecord
+from core.observability.tracer import Tracer, SpanStatus
+
+if TYPE_CHECKING:
+    from core.observability.token_budget import TokenBudget
 
 
 CONTEXT_HEADER = "--- RELEVANT CODEBASE CONTEXT ---"
@@ -38,6 +42,7 @@ class RetrievalContext:
     similarity_scores: List[float]
     retrieval_duration_ms: int
     total_tokens_estimate: int = field(init=False)
+    _formatted_context: Optional[str] = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Compute a rough token estimate after construction."""
@@ -46,6 +51,8 @@ class RetrievalContext:
     @property
     def formatted_context(self) -> str:
         """Return retrieved chunks formatted for prompt injection."""
+        if self._formatted_context is not None:
+            return self._formatted_context
         if not self.retrieved_chunks:
             return CONTEXT_HEADER
         sections = [CONTEXT_HEADER]
@@ -74,12 +81,16 @@ class ContextRetriever:
         embedder: BaseEmbedder,
         max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
         top_k: int = DEFAULT_TOP_K,
+        tracer: Optional[Tracer] = None,
+        token_budget: Optional[TokenBudget] = None,
     ) -> None:
         """Initialize retrieval dependencies and limits."""
         self.vector_store = vector_store
         self.embedder = embedder
         self.max_context_tokens = max_context_tokens
         self.top_k = top_k
+        self.tracer = tracer
+        self.token_budget = token_budget
 
     def retrieve_for_task(
         self,
@@ -87,31 +98,57 @@ class ContextRetriever:
         file_path: Optional[str] = None,
         agent_name: Optional[str] = None,
         metadata_filter: Optional[Dict[str, Any]] = None,
+        token_budget: Optional[TokenBudget] = None,
     ) -> RetrievalContext:
         """Retrieve and format relevant chunks for one agent task."""
-        started_at = time.perf_counter()
-        query = self._query_text(task_description, file_path, agent_name)
-        results = self.vector_store.search(
-            self.embedder.embed(query),
-            k=self.top_k,
-            filter_metadata=metadata_filter,
-        )
-        combined_results = list(results)
-        if file_path:
-            combined_results.extend(self._file_results(file_path))
-        deduplicated_results = self._deduplicated_results(combined_results)
-        trimmed_results = self._trimmed_results(deduplicated_results)
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        return RetrievalContext(
-            query=query,
-            retrieved_chunks=[
-                code_chunk_from_record(result.record) for result in trimmed_results
-            ],
-            similarity_scores=[
-                result.similarity_score for result in trimmed_results
-            ],
-            retrieval_duration_ms=duration_ms,
-        )
+        span = self.tracer.start_span("context_retrieval", component="context_retriever") if self.tracer else None
+        try:
+            started_at = time.perf_counter()
+            query = self._query_text(task_description, file_path, agent_name)
+            results = self.vector_store.search(
+                self.embedder.embed(query),
+                k=self.top_k,
+                filter_metadata=metadata_filter,
+            )
+            combined_results = list(results)
+            if file_path:
+                combined_results.extend(self._file_results(file_path))
+            deduplicated_results = self._deduplicated_results(combined_results)
+            trimmed_results = self._trimmed_results(deduplicated_results)
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            context = RetrievalContext(
+                query=query,
+                retrieved_chunks=[
+                    code_chunk_from_record(result.record) for result in trimmed_results
+                ],
+                similarity_scores=[
+                    result.similarity_score for result in trimmed_results
+                ],
+                retrieval_duration_ms=duration_ms,
+            )
+
+            tb = token_budget or getattr(self, "token_budget", None)
+            if tb:
+                budgets_dict = getattr(tb, "budgets", tb.DEFAULT_BUDGETS)
+                agent_budget = budgets_dict.get(agent_name or "default", budgets_dict["default"])
+                budget_for_context = agent_budget["hard_limit_per_call"] // 3
+                trimmed_context = tb.trim_context_to_budget(
+                    context.formatted_context, budget_for_context
+                )
+                context._formatted_context = trimmed_context
+                context.total_tokens_estimate = len(trimmed_context) // TOKEN_ESTIMATE_DIVISOR
+
+            if span:
+                span.tags.update({
+                    "chunks_retrieved": len(context.retrieved_chunks),
+                    "query_tokens": len(query) // 4
+                })
+                span.finish(SpanStatus.OK)
+            return context
+        except Exception as e:
+            if span:
+                span.finish(SpanStatus.ERROR, error=str(e))
+            raise
 
     def retrieve_related_files(self, file_path: str) -> List[str]:
         """Return files that import or are imported by the given file path."""

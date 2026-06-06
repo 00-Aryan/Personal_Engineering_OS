@@ -154,6 +154,12 @@ class TaskQueue:
     ) -> Optional[AgentResult]:
         """Run the target agent handle method and swallow failures."""
         try:
+            from core.observability.token_budget import _local
+            _local.current_task_id = event.event_id
+        except Exception:
+            pass
+
+        try:
             result = target_agent.handle(event)
             if result is not None and self._result_callback is not None:
                 self._result_callback(result)

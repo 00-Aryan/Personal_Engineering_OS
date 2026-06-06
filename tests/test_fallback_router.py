@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterator
+from typing import Any, Dict, Iterator
 
 import pytest
 
@@ -28,6 +28,10 @@ class FakeProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        agent_name: str | None = None,
+        token_budget: Any = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> str:
         """Return fake response or raise a configured failure."""
         self.calls += 1

@@ -20,6 +20,7 @@ from core.evaluation.regression_detector import RegressionDetector
 from core.evaluation.schema_validator import SchemaValidator, ValidationResult
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
+from core.observability.tracer import Tracer, SpanStatus
 
 if TYPE_CHECKING:
     from core.intelligence.collaboration import CollaborationBroker
@@ -252,6 +253,7 @@ class CloneAgent(BaseAgent):
         memory_manager: Optional["MemoryManager"] = None,
         semantic_router: Optional["SemanticRouter"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         """Initialize CloneAgent state and required project log files."""
         super().__init__(
@@ -272,14 +274,30 @@ class CloneAgent(BaseAgent):
         self.evaluation_store = evaluation_store
         self.quality_gate = quality_gate
         self.semantic_router = semantic_router
+        self.tracer = tracer
         self.decision_logger = DecisionLogger(self.project_root)
         self._ensure_project_files()
 
     def classify_decision(self, event: AgentEvent) -> DecisionCategory:
         """Classify an incoming event into a Clone decision category."""
-        if self.semantic_router is not None:
-            return self._semantic_decision_category(event)
-        return self._keyword_decision_category(event)
+        span = self.tracer.start_span("clone.classify", component="clone") if self.tracer else None
+        try:
+            if self.semantic_router is not None:
+                category, routing_method = self._semantic_decision_category(event)
+            else:
+                category = self._keyword_decision_category(event)
+                routing_method = "keyword"
+            if span:
+                span.tags.update({
+                    "decision": category.value,
+                    "method": routing_method
+                })
+                span.finish(SpanStatus.OK)
+            return category
+        except Exception as e:
+            if span:
+                span.finish(SpanStatus.ERROR, error=str(e))
+            raise
 
     def _keyword_decision_category(self, event: AgentEvent) -> DecisionCategory:
         """Classify an event using the legacy keyword and event-type rules."""
@@ -294,7 +312,7 @@ class CloneAgent(BaseAgent):
             return DecisionCategory.AUTONOMOUS
         return DecisionCategory.AUTONOMOUS
 
-    def _semantic_decision_category(self, event: AgentEvent) -> DecisionCategory:
+    def _semantic_decision_category(self, event: AgentEvent) -> tuple[DecisionCategory, str]:
         """Classify an event with semantic routing and keyword fallback."""
         decision = self.semantic_router.route(self._event_description(event))
         self.logger.info(
@@ -307,18 +325,28 @@ class CloneAgent(BaseAgent):
         if decision.routing_method == "keyword_fallback":
             self.logger.warning("Semantic confidence low, used keyword fallback")
         try:
-            return DecisionCategory(decision.category)
+            return DecisionCategory(decision.category), decision.routing_method
         except ValueError:
-            return self._keyword_decision_category(event)
+            return self._keyword_decision_category(event), decision.routing_method
 
     def dispatch(self, event: AgentEvent) -> List[AgentEvent]:
         """Create and optionally submit child events for responsible agents."""
-        next_events = [
-            self._targeted_event(event, target_agent)
-            for target_agent in self._dispatch_targets(event)
-        ]
-        self._submit_dispatched_events(next_events)
-        return next_events
+        span = self.tracer.start_span("clone.dispatch", component="clone") if self.tracer else None
+        try:
+            targets = self._dispatch_targets(event)
+            next_events = [
+                self._targeted_event(event, target_agent)
+                for target_agent in targets
+            ]
+            self._submit_dispatched_events(next_events)
+            if span:
+                span.tags["target_agents"] = list(targets)
+                span.finish(SpanStatus.OK)
+            return next_events
+        except Exception as e:
+            if span:
+                span.finish(SpanStatus.ERROR, error=str(e))
+            raise
 
     def escalate(
         self,
@@ -327,14 +355,22 @@ class CloneAgent(BaseAgent):
         duration_ms: Optional[int] = None,
     ) -> None:
         """Append an event to the escalation queue and decision log."""
-        timestamp = _utc_timestamp()
-        safe_reason = _sanitize_table_value(reason)
-        row = self._markdown_row(
-            [timestamp, event.event_id, safe_reason, LOG_STATUS_PENDING]
-        )
-        _append_atomically(self._escalation_queue_path, row)
-        self._log_decision(event, DecisionCategory.ESCALATE, reason, duration_ms)
-        self.logger.warning(row.strip())
+        span = self.tracer.start_span("clone.escalate", component="clone", tags={"reason": reason}) if self.tracer else None
+        try:
+            timestamp = _utc_timestamp()
+            safe_reason = _sanitize_table_value(reason)
+            row = self._markdown_row(
+                [timestamp, event.event_id, safe_reason, LOG_STATUS_PENDING]
+            )
+            _append_atomically(self._escalation_queue_path, row)
+            self._log_decision(event, DecisionCategory.ESCALATE, reason, duration_ms)
+            self.logger.warning(row.strip())
+            if span:
+                span.finish(SpanStatus.OK)
+        except Exception as e:
+            if span:
+                span.finish(SpanStatus.ERROR, error=str(e))
+            raise
 
     def handle_blocked(self, event: AgentEvent) -> List[AgentEvent]:
         """Record a blocked event and return independent queued events."""
@@ -370,53 +406,88 @@ class CloneAgent(BaseAgent):
 
     def handle(self, event: AgentEvent) -> AgentResult:
         """Classify, log, and dispatch a Clone Agent event."""
-        started_at = perf_counter()
-        if event.event_type is EventType.PERMISSION_GRANTED:
-            return self._handle_permission_granted(
-                event,
-                self._duration_ms(started_at),
-            )
+        try:
+            from core.observability.token_budget import _local
+            _local.current_task_id = event.event_id
+        except Exception:
+            pass
 
-        decision_category = self.classify_decision(event)
-        reasoning = self._decision_reason(event, decision_category)
+        if self.tracer:
+            self.tracer.start_trace(event.event_id, event.event_type.value)
 
-        if decision_category is DecisionCategory.ESCALATE:
-            self.escalate(event, reasoning, self._duration_ms(started_at))
-            return AgentResult(
-                success=True,
-                output=self._result_output(decision_category, reasoning),
-                escalate=True,
-                escalation_reason=reasoning,
-            )
+        span = self.tracer.start_span(
+            "clone.handle",
+            component="clone",
+            tags={
+                "event_type": event.event_type.value,
+                "event_id": event.event_id,
+            },
+        ) if self.tracer else None
 
-        if decision_category is DecisionCategory.DEFER_PARALLEL:
-            self._submit_blocked_event(event)
-            independent_events = self.handle_blocked(event)
-            next_events = self._dispatch_independent_events(independent_events)
+        try:
+            started_at = perf_counter()
+            if event.event_type is EventType.PERMISSION_GRANTED:
+                res = self._handle_permission_granted(
+                    event,
+                    self._duration_ms(started_at),
+                )
+                if span:
+                    span.finish(SpanStatus.OK)
+                return res
+
+            decision_category = self.classify_decision(event)
+            reasoning = self._decision_reason(event, decision_category)
+
+            if decision_category is DecisionCategory.ESCALATE:
+                self.escalate(event, reasoning, self._duration_ms(started_at))
+                res = AgentResult(
+                    success=True,
+                    output=self._result_output(decision_category, reasoning),
+                    escalate=True,
+                    escalation_reason=reasoning,
+                )
+                if span:
+                    span.finish(SpanStatus.OK)
+                return res
+
+            if decision_category is DecisionCategory.DEFER_PARALLEL:
+                self._submit_blocked_event(event)
+                independent_events = self.handle_blocked(event)
+                next_events = self._dispatch_independent_events(independent_events)
+                self._log_decision(
+                    event,
+                    decision_category,
+                    reasoning,
+                    self._duration_ms(started_at),
+                )
+                res = AgentResult(
+                    success=True,
+                    output=self._result_output(decision_category, reasoning),
+                    next_events=next_events,
+                )
+                if span:
+                    span.finish(SpanStatus.OK)
+                return res
+
+            next_events = self.dispatch(event)
             self._log_decision(
                 event,
                 decision_category,
                 reasoning,
                 self._duration_ms(started_at),
             )
-            return AgentResult(
+            res = AgentResult(
                 success=True,
                 output=self._result_output(decision_category, reasoning),
                 next_events=next_events,
             )
-
-        next_events = self.dispatch(event)
-        self._log_decision(
-            event,
-            decision_category,
-            reasoning,
-            self._duration_ms(started_at),
-        )
-        return AgentResult(
-            success=True,
-            output=self._result_output(decision_category, reasoning),
-            next_events=next_events,
-        )
+            if span:
+                span.finish(SpanStatus.OK)
+            return res
+        except Exception as e:
+            if span:
+                span.finish(SpanStatus.ERROR, error=str(e))
+            raise
 
     def process_agent_result(
         self,

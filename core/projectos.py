@@ -20,6 +20,12 @@ from agents.planning_agent import PlanningAgent
 from agents.test_agent import TestAgent
 from core.agent_registry import AgentRegistry
 from core.clone_agent import CloneAgent
+from core.observability.tracer import Tracer, TraceStore
+from core.observability.token_budget import TokenBudget
+from core.observability.cost_tracker import CostTracker
+from core.observability.rate_limiter import ProviderRateLimits
+from core.observability.circuit_breaker import CircuitBreaker
+from core.observability.alerting import AlertManager
 from core.evaluation.criteria_library import (
     code_review_criteria,
     code_writing_criteria,
@@ -182,6 +188,21 @@ class ProjectOS:
         self.config = self._load_config()
         self.provider_factory = provider_factory
         self.logger = logging.getLogger(f"{LOGGER_NAME}.{self.project_name}")
+        self.trace_store = TraceStore(self.state_dir)
+        self.tracer = Tracer(self.trace_store, enabled=True)
+        self.token_budget = TokenBudget(self.state_dir)
+        custom_catalog = self.config.get("pricing", {}).get("catalog", None)
+        self.cost_tracker = CostTracker(
+            self.state_dir,
+            usd_to_inr=self._get_usd_to_inr(),
+            pricing_catalog=custom_catalog
+        )
+        self.cost_tracker.tracer = self.tracer
+        self.circuit_breakers = {
+            "gemini": CircuitBreaker("gemini", state_dir=self.state_dir),
+            "openrouter": CircuitBreaker("openrouter", state_dir=self.state_dir),
+            "ollama": CircuitBreaker("ollama", state_dir=self.state_dir),
+        }
         self.providers = self._initialize_providers()
         self.provider_health_monitor = ProviderHealthMonitor(
             self._provider_health_targets()
@@ -208,7 +229,12 @@ class ProjectOS:
             self.embedder,
         )
         self.code_indexer = CodeIndexer(self.vector_store, self.embedder)
-        self.context_retriever = ContextRetriever(self.vector_store, self.embedder)
+        self.context_retriever = ContextRetriever(
+            self.vector_store,
+            self.embedder,
+            tracer=self.tracer,
+            token_budget=self.token_budget,
+        )
         self.semantic_router = SemanticRouter(
             self.embedder,
             self.routing_vector_store,
@@ -219,7 +245,7 @@ class ProjectOS:
             self.embedder,
             self.state_dir,
         )
-        self.memory_manager = MemoryManager(self.memory_store, self.embedder)
+        self.memory_manager = MemoryManager(self.memory_store, self.embedder, tracer=self.tracer)
         self.evaluation_store = EvaluationStore(self.state_dir)
         self.static_analyzer = StaticAnalyzer()
         self.quality_scorer = QualityScorer(
@@ -236,7 +262,9 @@ class ProjectOS:
             self.quality_scorer,
             self.regression_detector,
             self.state_dir / GATE_LOG_NAME,
+            tracer=self.tracer,
         )
+        self.alert_manager = AlertManager(self.state_dir)
         self.quality_evaluators = self._initialize_quality_evaluators()
         self.task_queue = TaskQueue(
             max_workers=TASK_QUEUE_WORKERS,
@@ -275,10 +303,13 @@ class ProjectOS:
         if self._event_thread is not None and self._event_thread.is_alive():
             return
         self.stop_event.clear()
+        if self.tracer and self.tracer.enabled:
+            self.logger.info("Tracing enabled. Traces stored in .projectos_state/")
         self._build_code_index()
         self._log_memory_stats()
         self._restore_persisted_queue_state()
         self.provider_health_monitor.start()
+        self.alert_manager.start()
         self.trigger_system.start()
         self._event_thread = threading.Thread(
             target=self._event_loop,
@@ -292,6 +323,7 @@ class ProjectOS:
         self.stop_event.set()
         self.trigger_system.stop()
         self.provider_health_monitor.stop()
+        self.alert_manager.stop()
         if self._event_thread is not None:
             self._event_thread.join(timeout=EVENT_THREAD_JOIN_SECONDS)
         self.task_queue.shutdown(wait=True)
@@ -420,6 +452,7 @@ class ProjectOS:
                 context_retriever=self.context_retriever,
                 memory_manager=self.memory_manager,
                 collaboration_broker=self.collaboration_broker,
+                tracer=self.tracer,
             ),
             AGENT_CODE_REVIEW: CodeReviewAgent(
                 self.providers[AGENT_CODE_REVIEW],
@@ -429,6 +462,7 @@ class ProjectOS:
                 context_retriever=self.context_retriever,
                 memory_manager=self.memory_manager,
                 collaboration_broker=self.collaboration_broker,
+                tracer=self.tracer,
             ),
             AGENT_ARCHITECTURE: ArchitectureAgent(
                 self.providers[AGENT_ARCHITECTURE],
@@ -468,6 +502,7 @@ class ProjectOS:
             memory_manager=self.memory_manager,
             semantic_router=self.semantic_router,
             collaboration_broker=self.collaboration_broker,
+            tracer=self.tracer,
         )
         self._register_agent_with_alias(AGENT_CLONE, clone_agent)
         return clone_agent
@@ -500,13 +535,80 @@ class ProjectOS:
         self.agent_registry.register(name, agent_instance)
         self.agent_registry.register(f"{name}{ALIAS_SUFFIX}", agent_instance)
 
+    def _provider_instance_for_model(self, model_key: str, agent_name: str) -> Optional[ModelProvider]:
+        """Create a model provider instance for a specific model key."""
+        if "ollama" in model_key:
+            provider_name = "ollama"
+        elif "gemini" in model_key:
+            provider_name = "gemini"
+        else:
+            provider_name = "openrouter"
+
+        provider_class = PROVIDER_CLASSES[provider_name]
+        provider = provider_class(
+            agent_name=None,
+            config_path=self.config_path,
+            token_budget=self.token_budget,
+            cost_tracker=self.cost_tracker,
+            rate_limiter=ProviderRateLimits.get(provider_name),
+            circuit_breaker=self.circuit_breakers.get(provider_name),
+        )
+        provider._model_name = model_key
+        return provider
+
     def _provider_for_agent(self, agent_name: str) -> Any:
         """Return the configured provider for an agent."""
         if self.provider_factory is not None:
-            return self.provider_factory(agent_name, self.config_path)
-        provider_name = self._agent_config(agent_name).get(CONFIG_KEY_PROVIDER)
-        provider_class = PROVIDER_CLASSES[str(provider_name)]
-        return provider_class(agent_name, self.config_path)
+            provider = self.provider_factory(agent_name, self.config_path)
+        else:
+            provider_name = self._agent_config(agent_name).get(CONFIG_KEY_PROVIDER)
+            provider_class = PROVIDER_CLASSES[str(provider_name)]
+            provider = provider_class(
+                agent_name,
+                self.config_path,
+                token_budget=self.token_budget,
+                cost_tracker=self.cost_tracker,
+                rate_limiter=ProviderRateLimits.get(str(provider_name)),
+                circuit_breaker=self.circuit_breakers.get(str(provider_name)),
+            )
+
+        if provider is not None:
+            if not getattr(provider, "token_budget", None):
+                provider.token_budget = self.token_budget
+            if not getattr(provider, "cost_tracker", None):
+                provider.cost_tracker = self.cost_tracker
+            if not getattr(provider, "rate_limiter", None):
+                provider_name_str = self._agent_config(agent_name).get(CONFIG_KEY_PROVIDER)
+                provider.rate_limiter = ProviderRateLimits.get(str(provider_name_str))
+            if not getattr(provider, "circuit_breaker", None):
+                provider_name_str = self._agent_config(agent_name).get(CONFIG_KEY_PROVIDER)
+                provider.circuit_breaker = self.circuit_breakers.get(str(provider_name_str))
+            if not getattr(provider, "tracer", None):
+                provider.tracer = self.tracer
+
+        # Check if fallback chain exists and construct FallbackRouter
+        fallback_chain = self.config.get("fallback_chain", {}).get(agent_name)
+        if fallback_chain and isinstance(fallback_chain, list) and provider is not None:
+            fallbacks = []
+            for fallback_model in fallback_chain:
+                if fallback_model == provider.get_model_name():
+                    continue
+                fb_prov = self._provider_instance_for_model(fallback_model, agent_name)
+                if fb_prov:
+                    fallbacks.append(fb_prov)
+            if fallbacks:
+                from core.fallback_router import FallbackRouter
+                fallback_router = FallbackRouter(
+                    primary=provider,
+                    fallbacks=fallbacks,
+                    health_monitor=self.provider_health_monitor
+                )
+                provider.fallback_router = fallback_router
+                for fb in fallbacks:
+                    fb.fallback_router = fallback_router
+                return fallback_router
+
+        return provider
 
     def _provider_health_targets(self) -> dict[str, Any]:
         """Return one provider instance per configured provider name."""
@@ -546,6 +648,14 @@ class ProjectOS:
         if not isinstance(config, Mapping):
             raise ValueError("ProjectOS config must be a mapping.")
         return config
+
+    def _get_usd_to_inr(self) -> float:
+        """Return the configured USD to INR exchange rate from config."""
+        try:
+            pricing = self.config.get("pricing", {})
+            return float(pricing.get("usd_to_inr", 83.5))
+        except Exception:
+            return 83.5
 
     def _project_root_for_config(self, config_path: Path) -> Path:
         """Return the project root inferred from config/models.yaml."""

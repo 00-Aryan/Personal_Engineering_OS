@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Iterator, List, Mapping
+from typing import Iterator, List, Mapping, Optional, TYPE_CHECKING
 
 from core.model_provider import ModelProvider
 from core.provider_health import ProviderHealthMonitor
+
+if TYPE_CHECKING:
+    from core.observability.token_budget import TokenBudget
 
 
 LOGGER_NAME = "projectos.fallback_router"
@@ -37,6 +40,10 @@ class FallbackRouter(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        agent_name: Optional[str] = None,
+        token_budget: Optional[TokenBudget] = None,
+        rate_limiter: Optional[Any] = None,
+        circuit_breaker: Optional[Any] = None,
     ) -> str:
         """Return completion text from the first healthy successful provider."""
         attempted: List[str] = []
@@ -46,7 +53,15 @@ class FallbackRouter(ModelProvider):
             if not self._is_provider_healthy(provider_name):
                 continue
             try:
-                response = provider.complete(prompt, system_prompt, max_tokens)
+                response = provider.complete(
+                    prompt,
+                    system_prompt,
+                    max_tokens,
+                    agent_name=agent_name,
+                    token_budget=token_budget,
+                    rate_limiter=rate_limiter,
+                    circuit_breaker=circuit_breaker,
+                )
             except Exception as error:
                 self._logger.warning(LOG_PROVIDER_FAILED, provider_name, error)
                 continue

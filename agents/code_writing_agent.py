@@ -15,6 +15,8 @@ from core.evaluation.static_analyzer import StaticAnalysisReport, StaticAnalyzer
 from core.events import AgentEvent, AgentResult, EventType
 from core.intelligence.collaboration import ConsultationType
 from core.model_provider import ModelProvider
+from core.observability.tracer import Tracer, SpanStatus
+
 from core.safety import SafetyPolicy, SafetyResult
 
 if TYPE_CHECKING:
@@ -159,6 +161,7 @@ class CodeWritingAgent(BaseAgent):
         context_retriever: Optional["ContextRetriever"] = None,
         memory_manager: Optional["MemoryManager"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         """Initialize CodeWritingAgent with model access and project paths."""
         super().__init__(
@@ -173,73 +176,94 @@ class CodeWritingAgent(BaseAgent):
         self.project_root = Path(project_root)
         self.safety_policy = safety_policy
         self.static_analyzer = static_analyzer
+        self.tracer = tracer
 
     def handle(self, event: AgentEvent) -> AgentResult:
         """Write code for an incoming task event and emit CODE_WRITTEN."""
-        self.update_consultation_depth(event)
-        payload_error = self._validate_payload(event.payload)
-        if payload_error:
-            return self._failure_result(event, payload_error)
+        file_path_value = event.payload.get(PAYLOAD_KEY_FILE_PATH)
+        span = self.tracer.start_span("code_writing.handle", component="code_writing",
+            tags={"file_path": str(file_path_value) if file_path_value else "", "agent": self.name}) if self.tracer else None
+        try:
+            self.update_consultation_depth(event)
+            payload_error = self._validate_payload(event.payload)
+            if payload_error:
+                res = self._failure_result(event, payload_error)
+                if span:
+                    span.finish(SpanStatus.OK)
+                return res
 
-        task_id = str(event.payload[PAYLOAD_KEY_TASK_ID])
-        file_path = self._resolve_path(str(event.payload[PAYLOAD_KEY_FILE_PATH]))
-        existing_code = self._existing_code(file_path, event.payload)
-        architecture_guidance = self._architecture_guidance(
-            event.payload,
-            existing_code,
-        )
-        prompt = self._build_prompt(
-            event.payload,
-            existing_code,
-            architecture_guidance,
-        )
-        context = self.get_context(
-            task_description=str(event.payload.get(PAYLOAD_KEY_TASK_DESCRIPTION, EMPTY_TEXT)),
-            file_path=str(file_path),
-        )
-        model_output = self.model_provider.complete(
-            prompt,
-            self._system_prompt(context),
-            MODEL_MAX_TOKENS,
-        )
-        code = self._normalize_model_code(model_output)
-        safety_result = self._validate_safe_write(event, file_path, code)
-        if safety_result is not None and safety_result.diff_preview:
-            self._log_decision(event, DECISION_DIFF_PREVIEW, safety_result.diff_preview)
-        if safety_result is not None and not safety_result.allowed:
-            return self._safety_failure_result(event, file_path, safety_result)
-        escalation_reason = self._safety_warning_reason(file_path, safety_result)
-        _write_atomically(file_path, code)
+            task_id = str(event.payload[PAYLOAD_KEY_TASK_ID])
+            file_path = self._resolve_path(str(event.payload[PAYLOAD_KEY_FILE_PATH]))
+            if span:
+                span.tags["file_path"] = str(file_path)
 
-        line_count = self._line_count(code)
-        reasoning = DECISION_REASON_WRITTEN_TEMPLATE.format(
-            line_count=line_count,
-            file_path=str(file_path),
-            task_id=task_id,
-        )
-        self._log_decision(event, DECISION_SUCCESS, reasoning)
-        static_report = self._run_static_analysis(event, file_path)
-        static_report_path = self._write_static_report(event, static_report)
-        static_escalation_reason = self._static_escalation_reason(
-            event,
-            static_report,
-        )
-        if static_escalation_reason is not None:
-            escalation_reason = static_escalation_reason
-        metadata = {}
-        if static_report_path is not None:
-            metadata[METADATA_KEY_STATIC_REPORT] = str(static_report_path)
-        return AgentResult(
-            success=True,
-            output={
-                OUTPUT_KEY_FILE_PATH: str(file_path),
-                OUTPUT_KEY_LINE_COUNT: line_count,
-            },
-            next_events=[self._code_written_event(event, file_path, line_count)],
-            escalate=bool(escalation_reason),
-            escalation_reason=escalation_reason,
-            metadata=metadata,
-        )
+            existing_code = self._existing_code(file_path, event.payload)
+            architecture_guidance = self._architecture_guidance(
+                event.payload,
+                existing_code,
+            )
+            prompt = self._build_prompt(
+                event.payload,
+                existing_code,
+                architecture_guidance,
+            )
+            context = self.get_context(
+                task_description=str(event.payload.get(PAYLOAD_KEY_TASK_DESCRIPTION, EMPTY_TEXT)),
+                file_path=str(file_path),
+            )
+            model_output = self.model_provider.complete(
+                prompt,
+                self._system_prompt(context),
+                MODEL_MAX_TOKENS,
+            )
+            code = self._normalize_model_code(model_output)
+            safety_result = self._validate_safe_write(event, file_path, code)
+            if safety_result is not None and safety_result.diff_preview:
+                self._log_decision(event, DECISION_DIFF_PREVIEW, safety_result.diff_preview)
+            if safety_result is not None and not safety_result.allowed:
+                res = self._safety_failure_result(event, file_path, safety_result)
+                if span:
+                    span.finish(SpanStatus.OK)
+                return res
+            escalation_reason = self._safety_warning_reason(file_path, safety_result)
+            _write_atomically(file_path, code)
+
+            line_count = self._line_count(code)
+            reasoning = DECISION_REASON_WRITTEN_TEMPLATE.format(
+                line_count=line_count,
+                file_path=str(file_path),
+                task_id=task_id,
+            )
+            self._log_decision(event, DECISION_SUCCESS, reasoning)
+            static_report = self._run_static_analysis(event, file_path)
+            static_report_path = self._write_static_report(event, static_report)
+            static_escalation_reason = self._static_escalation_reason(
+                event,
+                static_report,
+            )
+            if static_escalation_reason is not None:
+                escalation_reason = static_escalation_reason
+            metadata = {}
+            if static_report_path is not None:
+                metadata[METADATA_KEY_STATIC_REPORT] = str(static_report_path)
+            res = AgentResult(
+                success=True,
+                output={
+                    OUTPUT_KEY_FILE_PATH: str(file_path),
+                    OUTPUT_KEY_LINE_COUNT: line_count,
+                },
+                next_events=[self._code_written_event(event, file_path, line_count)],
+                escalate=bool(escalation_reason),
+                escalation_reason=escalation_reason,
+                metadata=metadata,
+            )
+            if span:
+                span.finish(SpanStatus.OK)
+            return res
+        except Exception as e:
+            if span:
+                span.finish(SpanStatus.ERROR, error=str(e))
+            raise
 
     def _run_static_analysis(
         self,
