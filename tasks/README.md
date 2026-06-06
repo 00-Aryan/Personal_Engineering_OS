@@ -48,7 +48,10 @@ Never start a task without reading all existing code first.
 - TASK_35: DONE (cost tracker - 283 tests green)
 - TASK_36: DONE (rate limiter + circuit breaker - 298 tests green)
 - TASK_37: DONE (alerting + anomaly detection - 309 tests green)
-- TASK_38: PENDING
+- TASK_38: DONE (observability integration + readiness check - 309 tests green)
+
+## Phase 6 — Agent Memory Distillation + Self-Improvement
+- Phase 6 — Agent Memory Distillation + Self-Improvement (PENDING)
 
 ## Audit Protocol
 After every task, TASK_XX_RESULT.md must contain:
