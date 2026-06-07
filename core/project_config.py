@@ -23,7 +23,7 @@ CONFIG_DIR_NAME = "config"
 STATE_DIR_NAME = ".projectos_state"
 
 DEFAULT_WATCH_PATTERNS = ["*.py", "*.md"]
-DEFAULT_IGNORE_PATTERNS = ["__pycache__", ".git", ".venv"]
+DEFAULT_IGNORE_PATTERNS = ["__pycache__", ".git", ".venv", "reviews", ".projectos_state", "docs"]
 
 KEY_PROJECTS = "projects"
 KEY_NAME = "name"

@@ -163,7 +163,7 @@ class ChromaVectorStore(BaseVectorStore):
         metadata: Dict[str, Any] = {
             key: value
             for key, value in record.metadata.items()
-            if isinstance(value, (str, int, float, bool)) or value is None
+            if isinstance(value, (str, int, float, bool)) and value is not None
         }
         metadata["created_at"] = record.created_at.isoformat()
         metadata["embedder"] = self.embedder.get_embedder_name()

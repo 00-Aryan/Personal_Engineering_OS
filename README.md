@@ -127,6 +127,34 @@ MemoryManager.learn_from_evaluation() (store learnings)
 | `test` | Generates pytest files and runs pytest for changed code | `CODE_CHANGED`, `CODE_WRITTEN` | `openrouter-free` via `openrouter` |
 | `docs` | Updates source documentation and optionally README content | `CODE_WRITTEN`, `TESTS_DONE`, `DOCS_UPDATED` | `gemini-flash` via `gemini` |
 
+## Provider Setup
+
+1. Copy `.env.example` to `.env`:
+
+```bash
+cp .env.example .env
+```
+
+2. Fill in at least one API key in `.env`.
+
+3. Run provider setup:
+
+```bash
+python scripts/setup_providers.py --no-prompt
+```
+
+4. Run the live smoke check:
+
+```bash
+python scripts/live_smoke.py
+```
+
+5. Start ProjectOS:
+
+```bash
+projectos run
+```
+
 ## Quick Start
 
 1. Install dependencies:

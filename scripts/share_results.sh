@@ -11,5 +11,7 @@ echo ""
 echo "=== LIVE TEST COUNT ==="
 UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync pytest -q --tb=no 2>/dev/null | tail -3
 echo ""
-echo "=== PENDING TASKS ==="
+echo "=== PENDING TASKS ==="         
 grep "PENDING" tasks/README.md
+
+

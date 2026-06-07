@@ -48,6 +48,14 @@ core/intelligence/memory_manager.py
 core/intelligence/memory_store.py
 core/intelligence/semantic_router.py
 core/intelligence/vector_store.py
+core/observability/__init__.py
+core/observability/alerting.py
+core/observability/anomaly_detector.py
+core/observability/circuit_breaker.py
+core/observability/cost_tracker.py
+core/observability/rate_limiter.py
+core/observability/token_budget.py
+core/observability/tracer.py
 mcp_server/__init__.py
 mcp_server/server.py
 projectos.egg-info/PKG-INFO
@@ -61,8 +69,12 @@ providers/ollama_provider.py
 scripts/benchmark.py
 scripts/evaluation_smoke.py
 scripts/intelligence_smoke.py
+scripts/live_smoke.py
+scripts/observability_smoke.py
+scripts/provider_setup.py
 scripts/quality_benchmark.py
 scripts/quality_delta.py
+scripts/setup_providers.py
 tests/test_architecture_agent.py
 tests/test_cli.py
 tests/test_clone_agent.py
@@ -82,6 +94,7 @@ tests/test_persistence.py
 tests/test_planning_agent.py
 tests/test_project_registry.py
 tests/test_provider_health.py
+tests/test_provider_setup.py
 tests/test_quality_benchmark.py
 tests/test_retry.py
 tests/test_safety.py

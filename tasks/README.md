@@ -50,8 +50,13 @@ Never start a task without reading all existing code first.
 - TASK_37: DONE (alerting + anomaly detection - 309 tests green)
 - TASK_38: DONE (observability integration + readiness check - 309 tests green)
 
-## Phase 6 — Agent Memory Distillation + Self-Improvement
-- Phase 6 — Agent Memory Distillation + Self-Improvement (PENDING)
+## Phase 6 — Real-World Validation
+- TASK_39: DONE (Real API Key Wiring + Live Provider Validation - 320 tests green)
+- TASK_40: DONE (Dogfood — Run ProjectOS on ProjectOS)
+- TASK_41: DONE (Process a Real External Project)
+- TASK_42: PENDING (Performance Profiling + Real Bottleneck Analysis)
+- TASK_43: PENDING (Configuration Consolidation)
+- TASK_44: PENDING (Phase 6 Hardening + Real-World Fixes)
 
 ## Audit Protocol
 After every task, TASK_XX_RESULT.md must contain:

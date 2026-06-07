@@ -203,10 +203,13 @@ class ProjectOS:
             "openrouter": CircuitBreaker("openrouter", state_dir=self.state_dir),
             "ollama": CircuitBreaker("ollama", state_dir=self.state_dir),
         }
+        self.provider_health_monitor = ProviderHealthMonitor({})
         self.providers = self._initialize_providers()
-        self.provider_health_monitor = ProviderHealthMonitor(
-            self._provider_health_targets()
-        )
+        health_targets = self._provider_health_targets()
+        self.provider_health_monitor.providers.update(health_targets)
+        for name in health_targets:
+            if name not in self.provider_health_monitor._status:
+                self.provider_health_monitor._status[name] = False
         self.git_manager = self._initialize_git_manager()
         self.agent_registry = AgentRegistry()
         self.collaboration_broker = CollaborationBroker(
@@ -670,6 +673,76 @@ class ProjectOS:
             agent_name: str(self.providers[agent_name].get_model_name())
             for agent_name in ALL_AGENT_NAMES
             if agent_name in self.providers
+        }
+
+    def run_for_duration(self, seconds: int) -> dict[str, Any]:
+        """Start all components, process events for N seconds, and gracefully shut down.
+
+        This enables scripted dogfood sessions without manual Ctrl+C.
+        """
+        import time
+
+        events_processed = 0
+        decisions_logged = 0
+        errors: list[str] = []
+
+        original_handle = self.clone_agent.handle
+        original_log = self.clone_agent.decision_logger.log
+
+        lock = threading.Lock()
+
+        def wrapped_handle(event: AgentEvent) -> Any:
+            nonlocal events_processed
+            try:
+                result = original_handle(event)
+                with lock:
+                    events_processed += 1
+                return result
+            except Exception as e:
+                with lock:
+                    errors.append(str(e))
+                raise
+
+        def wrapped_log(*args: Any, **kwargs: Any) -> Any:
+            nonlocal decisions_logged
+            try:
+                res = original_log(*args, **kwargs)
+                with lock:
+                    decisions_logged += 1
+                return res
+            except Exception as e:
+                with lock:
+                    errors.append(str(e))
+                raise
+
+        self.clone_agent.handle = wrapped_handle
+        self.clone_agent.decision_logger.log = wrapped_log
+
+        shutdown_event = threading.Event()
+
+        def expire_duration():
+            shutdown_event.set()
+
+        timer = threading.Timer(seconds, expire_duration)
+        timer.daemon = True
+        timer.start()
+
+        try:
+            self.start()
+            while not shutdown_event.is_set():
+                time.sleep(0.5)
+        except Exception as e:
+            errors.append(str(e))
+        finally:
+            timer.cancel()
+            self.stop()
+            self.clone_agent.handle = original_handle
+            self.clone_agent.decision_logger.log = original_log
+
+        return {
+            "events_processed": events_processed,
+            "decisions_logged": decisions_logged,
+            "errors": errors,
         }
 
     def _log_final_status(self) -> None:
