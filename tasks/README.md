@@ -65,6 +65,13 @@ Never start a task without reading all existing code first.
 - TASK_48: DONE (External-Audience README + Demo Preparation - 381 tests green)
 - TASK_49: DONE (Phase 7 Verification — Clean Install Test - 381 tests green)
 
+## Phase 8 — Open Source Launch
+- TASK_50: PENDING (Pre-Launch API Key Validation + Real Smoke)
+- TASK_51: PENDING (GitHub Repository Polish)
+- TASK_52: PENDING (Launch Announcement Preparation)
+- TASK_53: PENDING (Phase 8 Close — Final Release)
+
+
 ## Audit Protocol
 After every task, TASK_XX_RESULT.md must contain:
 - Files created or modified
