@@ -22,7 +22,7 @@ ENCODING = "utf-8"
 PROJECT_KEY = "project"
 VERSION_KEY = "version"
 DESCRIPTION_KEY = "description"
-EXPECTED_VERSION = "0.3.0"
+EXPECTED_VERSION = "0.5.0"
 EXPECTED_DESCRIPTION = (
     "Personal Engineering OS — autonomous multi-agent system for software "
     "project management"

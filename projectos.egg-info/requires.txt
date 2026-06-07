@@ -8,3 +8,4 @@ watchdog>=3.0.0
 
 [dev]
 pytest>=9.0.3
+pytest-timeout

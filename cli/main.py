@@ -2077,6 +2077,22 @@ def config_init(ctx: click.Context) -> None:
         click.secho(f"Failed to write .env file: {e}", fg="red")
 
 
+@cli.group(name="template")
+def template_group() -> None:
+    """Manage project templates."""
+    pass
+
+
+@template_group.command(name="list")
+def template_list() -> None:
+    """List available templates."""
+    click.echo("Available templates:")
+    click.echo("- ds_project")
+    click.echo("- rag_pipeline")
+    click.echo("- web_api")
+    click.echo("- cli_tool")
+
+
 if __name__ == "__main__":
     cli()
 
