@@ -59,8 +59,11 @@ Never start a task without reading all existing code first.
 - TASK_44: DONE (Phase 6 Hardening + Real-World Fixes - 355 tests green)
 
 ## Phase 7 — Developer Experience
-- TASK_48: DONE (Developer Documentation - 7 documentation tests green)
-- TASK_49: DONE (Clean Install Test)
+- TASK_45: DONE (One-Command Install + Setup Wizard - 368 tests green)
+- TASK_46: DONE (Project Templates - 375 tests green)
+- TASK_47: DONE (AGY + Codex Plugin Packaging - 381 tests green)
+- TASK_48: DONE (External-Audience README + Demo Preparation - 381 tests green)
+- TASK_49: DONE (Phase 7 Verification — Clean Install Test - 381 tests green)
 
 ## Audit Protocol
 After every task, TASK_XX_RESULT.md must contain:

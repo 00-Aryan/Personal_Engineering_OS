@@ -1,0 +1,7 @@
+# RAG pipeline additions
+*.faiss
+*.index
+chroma_db/
+vector_store/
+embeddings/
+*.bin

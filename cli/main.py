@@ -2086,13 +2086,63 @@ def template_group() -> None:
 @template_group.command(name="list")
 def template_list() -> None:
     """List available templates."""
+    from core.template_manager import TemplateManager
+    templates = TemplateManager.list_templates()
+    if not templates:
+        click.echo("No templates available.")
+        return
     click.echo("Available templates:")
-    click.echo("- ds_project")
-    click.echo("- rag_pipeline")
-    click.echo("- web_api")
-    click.echo("- cli_tool")
+    for t in templates:
+        click.echo(f"- {t['name']}: {t['description']}")
+
+
+@template_group.command(name="apply")
+@click.argument("name")
+@click.pass_context
+def template_apply(ctx: click.Context, name: str) -> None:
+    """Apply template to current project."""
+    project_root = _project_root(ctx)
+    config_path = project_root / "config" / "projectos.yaml"
+
+    from core.config_loader import ProjectConfig as MasterProjectConfig
+    from core.template_manager import TemplateManager
+
+    if not config_path.exists():
+        click.secho(f"Configuration file not found at {config_path}", fg="red")
+        ctx.exit(1)
+
+    try:
+        config = MasterProjectConfig.load(config_path)
+        TemplateManager.apply_template(name, config)
+
+        # Save config.raw_config back to disk atomically
+        import yaml
+        rendered = yaml.safe_dump(config.raw_config, sort_keys=False)
+        _write_atomically(config_path, rendered)
+
+        # Copy template files
+        TemplateManager.copy_template_files(name, project_root)
+
+        click.echo(f"Template applied: {name}")
+    except Exception as e:
+        click.secho(f"Failed to apply template: {e}", fg="red")
+        ctx.exit(1)
+
+
+@template_group.command(name="detect")
+@click.pass_context
+def template_detect(ctx: click.Context) -> None:
+    """Detect project type from workspace structure."""
+    project_root = _project_root(ctx)
+    from core.template_manager import TemplateManager
+    detected = TemplateManager.detect_project_type(project_root)
+    if detected:
+        click.echo(f"Detected project type: {detected}")
+    else:
+        click.echo("Unknown project type")
 
 
 if __name__ == "__main__":
     cli()
+
 

@@ -1,0 +1,37 @@
+# ProjectOS Template: Data Science Project
+name: ds_project
+description: "For ML/DS projects with notebooks, datasets, and model training"
+
+# Agent model overrides (DeepSeek for planning complex ML tasks)
+agents:
+  planning: deepseek-v3
+  architecture: deepseek-v3
+
+# Quality gate overrides (lower threshold — DS code is often exploratory)
+quality_gates:
+  code_writing:
+    min_score: 0.55
+    require_static: false  # notebooks don't need strict style
+
+# Ignore patterns (don't index or trigger on data files)
+ignore_patterns:
+  - "*.csv"
+  - "*.parquet"
+  - "*.pkl"
+  - "*.h5"
+  - "*.joblib"
+  - "data/"
+  - "models/"
+  - "notebooks/"
+  - ".ipynb_checkpoints/"
+
+# Routing examples specific to DS projects
+routing_examples:
+  - text: "train a machine learning model on dataset"
+    category: planning
+  - text: "feature engineering pipeline"
+    category: planning
+  - text: "model evaluation and metrics"
+    category: code_review
+  - text: "hyperparameter tuning configuration"
+    category: architecture

@@ -1,0 +1,29 @@
+name: rag_pipeline
+description: "For RAG systems with vector stores, embeddings, and LLM pipelines"
+
+agents:
+  planning: deepseek-v3
+  architecture: deepseek-v3
+
+quality_gates:
+  code_writing:
+    min_score: 0.70
+    block_security_high: true  # API keys and vector DB credentials
+
+ignore_patterns:
+  - "*.faiss"
+  - "*.index"
+  - "chroma_db/"
+  - "vector_store/"
+  - "embeddings/"
+  - "*.bin"
+
+routing_examples:
+  - text: "chunk documents for vector store ingestion"
+    category: planning
+  - text: "embedding model configuration"
+    category: architecture
+  - text: "retrieval quality evaluation"
+    category: code_review
+  - text: "prompt template for RAG chain"
+    category: code_writing

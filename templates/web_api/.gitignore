@@ -1,0 +1,6 @@
+# Web API additions
+migrations/
+*.db
+*.sqlite
+static/
+media/

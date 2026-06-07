@@ -1,0 +1,20 @@
+name: cli_tool
+description: "For command-line tools with argument parsing and shell integration"
+
+quality_gates:
+  code_writing:
+    min_score: 0.65
+    require_static: true
+
+ignore_patterns:
+  - "dist/"
+  - "build/"
+  - "*.egg-info/"
+
+routing_examples:
+  - text: "add new CLI subcommand"
+    category: planning
+  - text: "shell completion support"
+    category: code_writing
+  - text: "argument validation logic"
+    category: code_review

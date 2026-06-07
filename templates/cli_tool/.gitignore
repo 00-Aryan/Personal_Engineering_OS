@@ -1,0 +1,4 @@
+# CLI tool additions
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,24 @@
+name: web_api
+description: "For FastAPI/Flask REST APIs with routes, auth, and databases"
+
+quality_gates:
+  code_writing:
+    min_score: 0.75
+    block_security_high: true
+
+ignore_patterns:
+  - "migrations/"
+  - "*.db"
+  - "*.sqlite"
+  - "static/"
+  - "media/"
+
+routing_examples:
+  - text: "add authentication middleware"
+    category: architecture
+  - text: "database migration script"
+    category: planning
+  - text: "API endpoint rate limiting"
+    category: code_writing
+  - text: "request validation schema"
+    category: code_writing

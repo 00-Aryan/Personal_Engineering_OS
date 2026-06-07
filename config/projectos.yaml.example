@@ -1,0 +1,93 @@
+# ProjectOS Configuration
+# Copy this file: cp config/projectos.yaml.example config/projectos.yaml
+# Then edit values for your setup.
+
+# version: "0.3.0"
+
+# --- Project ---
+# project:
+#   name: "my-project"
+#   root: "."
+#   state_dir: ".projectos_state"
+#   watch_patterns: ["*.py"]
+#   ignore_patterns: ["__pycache__", ".venv", ".git", "test_*"]
+
+# --- Providers ---
+# providers:
+#   default: gemini-flash
+#   
+#   gemini-flash:
+#     type: gemini
+#     model: gemini-1.5-flash
+#     api_key_env: GEMINI_API_KEY
+#     
+#   deepseek-v3:
+#     type: openrouter
+#     model: deepseek/deepseek-chat
+#     api_key_env: OPENROUTER_API_KEY
+#     
+#   ollama-local:
+#     type: ollama
+#     model: llama3
+#     base_url_env: OLLAMA_BASE_URL
+#     base_url_default: http://localhost:11434
+
+# --- Agent Model Assignments ---
+# agents:
+#   clone:        gemini-flash
+#   planning:     deepseek-v3
+#   code_writing: gemini-flash
+#   code_review:  gemini-flash
+#   architecture: deepseek-v3
+#   test:         gemini-flash
+#   docs:         gemini-flash
+
+# --- Fallback Chains ---
+# fallbacks:
+#   planning:     [deepseek-v3, gemini-flash, ollama-local]
+#   code_writing: [gemini-flash, ollama-local]
+#   code_review:  [gemini-flash, ollama-local]
+
+# --- Token Budgets ---
+# token_budgets:
+#   code_review:   {soft: 3000, hard: 6000, daily: 100000}
+#   code_writing:  {soft: 3000, hard: 6000, daily: 100000}
+#   planning:      {soft: 2000, hard: 4000, daily: 50000}
+#   architecture:  {soft: 2000, hard: 4000, daily: 30000}
+#   test:          {soft: 3000, hard: 6000, daily: 80000}
+#   docs:          {soft: 1500, hard: 3000, daily: 40000}
+#   clone:         {soft: 1000, hard: 2000, daily: 200000}
+
+# --- Quality Gates ---
+# quality_gates:
+#   code_writing:
+#     min_score: 0.65
+#     require_llm_eval: true
+#     require_static: true
+#     block_security_high: true
+#     block_regression: true
+#   code_review:
+#     min_score: 0.70
+#     require_llm_eval: true
+#     require_static: false
+#     block_regression: true
+#   planning:
+#     min_score: 0.60
+#     require_llm_eval: true
+
+# --- Circuit Breakers ---
+# circuit_breakers:
+#   failure_threshold: 5
+#   recovery_timeout_seconds: 60
+
+# --- Alerts ---
+# alerts:
+#   daily_cost_inr_threshold: 100
+#   monthly_cost_inr_threshold: 2000
+#   quality_score_minimum: 0.60
+#   blocked_queue_max: 10
+#   evaluation_failure_rate_max: 0.30
+
+# --- Cost Tracking ---
+# costs:
+#   usd_to_inr: 83.5

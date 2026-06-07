@@ -1,0 +1,20 @@
+name: projectos
+version: "0.4.0"
+description: "Personal Engineering OS — autonomous multi-agent system"
+author: "Aryan Kumar"
+
+skills:
+  - .agents/skills/projectos-plan
+  - .agents/skills/projectos-review
+  - .agents/skills/projectos-status
+
+mcp_servers:
+  - name: projectos
+    command: ["uv", "run", "--no-sync", "python", "-m", "mcp_server.server"]
+    description: "ProjectOS MCP server exposing all agents as tools"
+
+workflows:
+  - .agents/workflows/run-task.md
+  - .agents/workflows/audit.md
+  - .agents/workflows/add-tasks.md
+  - .agents/workflows/fix-and-continue.md

@@ -1,0 +1,9 @@
+# Data Science ignore additions
+*.csv
+*.parquet
+*.pkl
+*.h5
+*.joblib
+data/
+models/
+notebooks/.ipynb_checkpoints/

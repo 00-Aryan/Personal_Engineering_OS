@@ -19,66 +19,111 @@ Requires-Dist: pytest>=9.0.3; extra == "dev"
 Requires-Dist: pytest-timeout; extra == "dev"
 Dynamic: license-file
 
-# ProjectOS
+# ProjectOS — Personal Engineering OS
 
-ProjectOS is an autonomous agent coordinator for software repositories. It automatically monitors codebases, performs code reviews, updates documentation, runs tests, and coordinates planning, all within your local environment.
+An autonomous background agent coordinator that reviews code, writes tests, updates documentation, and manages your backlog in real-time.
+
+[![CI Status](https://github.com/00-Aryan/Personal_Engineering_OS/actions/workflows/ci.yml/badge.svg)](https://github.com/00-Aryan/Personal_Engineering_OS/actions)
+[![Version](https://img.shields.io/github/v/release/00-Aryan/Personal_Engineering_OS?label=version)](https://github.com/00-Aryan/Personal_Engineering_OS/releases)
+[![License](https://img.shields.io/github/license/00-Aryan/Personal_Engineering_OS)](https://github.com/00-Aryan/Personal_Engineering_OS/blob/main/LICENSE)
+
+## What It Does
+
+ProjectOS is an autonomous agent coordinator that works silently in your local environment. It connects to your repository and orchestrates a roster of specialized agents to maintain codebase health. While you write code, ProjectOS continuously runs security audits, reviews changes, verifies test suites, updates documentation, and organizes backlog features without interrupting your focus.
+
+By running entirely on your local machine, the system maintains strict privacy standards. It connects to your choice of local or cloud AI models, managing request budgets and circuit breakers automatically to keep resources optimized. Instead of managing individual assistant prompts, ProjectOS gives you an integrated multi-agent engineering team that aligns itself with your repository's unique workflow.
+
+## Demo
+
+When you start ProjectOS, it begins monitoring your repository and launches a rich terminal dashboard:
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│ ProjectOS Daemon - Active Monitoring                                   │
+├────────────────────────────────────────────────────────────────────────┤
+│ Active Project: my-project [./]                                        │
+│ Status: Active                                                         │
+│                                                                        │
+│ Running Agents:                                                        │
+│  ● code_review  - Analyzing main.py (Gate passed: 0.82)                │
+│  ● test         - Generating suite for utils.py (8 passed)             │
+│  ○ docs         - Idle                                                 │
+│                                                                        │
+│ Recent Activity:                                                       │
+│  [04:02:10] EVENT: File changed (main.py)                              │
+│  [04:02:12] ROUTE: Routed change to review agent                       │
+│  [04:02:25] AUDIT: Quality score 0.82 matches gate criteria            │
+│  [04:02:28] WRITE: Updated documentation in README.md                  │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
 ## Quick Start
 
-1. **Install dependencies**:
-   ```bash
-   uv sync
-   ```
-2. **Configure your environment variables** in a `.env` file (copied from `.env.example`):
-   ```env
-   GEMINI_API_KEY="your_api_key_here"
-   OPENROUTER_API_KEY="your_api_key_here"
-   ```
-3. **Verify setup**:
-   ```bash
-   uv run projectos config validate
-   ```
-4. **Run the daemon**:
-   ```bash
-   uv run projectos run
-   ```
+```bash
+git clone https://github.com/00-Aryan/Personal_Engineering_OS
+cd Personal_Engineering_OS
+python install.py
+```
+
+That's it. The installer handles dependencies, configuration, and
+provider setup interactively.
+
+### Manual Setup
+For advanced configuration, see [docs/CONTRIBUTING.md].
+
+## How It Works
+
+ProjectOS routes repository events through a semantic router to dispatch task payloads to specialized agent & assistant personas.
+
+```text
+                [Repository Events]
+                         │
+                         ▼
+                 [Semantic Router]
+                         │
+        ┌────────┬───────┼────────┬────────┐
+        ▼        ▼       ▼        ▼        ▼
+     [Clone] [Planner] [Writer] [Reviewer] [Tester]
+```
+
+- **Clone**: The supervisor and event coordinator that routes change events to specific agents.
+- **Planning**: Translates feature requirements and backlog tasks into execution steps.
+- **Code Writing**: Implements changes and feature requirements in your workspace.
+- **Code Review**: Analyzes code modifications for quality, security, and styling errors.
+- **Architecture**: Evaluates system design, answers queries, and records decisions.
+- **Test**: Creates and verifies unit test suites for modified components.
+- **Docs**: Synchronizes and updates repository documentation when features change.
 
 ## Agent Roster
 
-ProjectOS coordinates the following engineering agents to maintain repository standards:
-
-| Agent | Responsibility | Primary Trigger |
+| Agent | Responsibility | When It Runs |
 | --- | --- | --- |
-| `clone` | Supervisor, coordinator, and event router | Incoming change events |
-| `planning` | Translates feature requirements into structured backlog tasks | Feature requests |
-| `code_writing` | Implements changes based on backlog tasks | Backlog updates |
-| `code_review` | Reviews code changes and writes reports under `reviews/` | File modifications |
-| `architecture` | Answers system queries and creates ADRs | Architecture questions |
-| `test` | Generates and runs pytest verification suites | File modifications |
-| `docs` | Automatically updates documentation and inline comments | Successful code reviews |
+| `clone` | Coordinates tasks and routes workspace events | On any repository file change |
+| `planning` | Translates user prompts into backlog items | When a new feature is requested |
+| `code_writing` | Implements changes based on planned backlog tasks | When a task is approved for writing |
+| `code_review` | Reviews files and outputs detailed quality reports | On file modification events |
+| `architecture` | Answers design questions and documents architecture decisions | On architecture inquiries |
+| `test` | Writes and executes unit testing suites | After code writing is completed |
+| `docs` | Updates inline comments and external project guides | After a successful code review |
 
-## CLI Commands
+## Use as AGY/Codex Plugin
 
-Manage the system using the `projectos` CLI:
+ProjectOS integrates natively with AGY and Codex CLI.
 
-| Command | Purpose |
-| --- | --- |
-| `projectos status` | Displays configured models and latest activities. |
-| `projectos run` | Starts the local background monitoring loop. |
-| `projectos review <file>` | Triggers a manual review event for a specific file. |
-| `projectos quality status` | Reports per-agent evaluation scores and regressions. |
-| `projectos quality baseline` | Displays saved model-versioned quality baselines. |
-| `projectos gate status` | Shows quality gate pass/block history. |
-| `projectos gate override <id>` | Bypasses a blocked gate decision with a reason. |
-| `projectos benchmark run` | Runs quality benchmarks and records results. |
-| `projectos audit` | Generates a quality audit report. |
-
-## Use as MCP Server
-
-ProjectOS can run as a Model Context Protocol (MCP) server for compatible client applications:
-
+**AGY:**
 ```bash
-codex mcp add projectos -- uv run --no-sync python -m mcp_server.server
+agy plugin install dist/projectos-plugin-v0.4.0.tar.gz
+```
+Then in any AGY session: use $projectos-plan, $projectos-review
+
+**Codex:**
+```bash
+codex plugin install dist/projectos-plugin-v0.4.0.tar.gz
+```
+
+**MCP Server (any client):**
+```bash
+uv run --no-sync python -m mcp_server.server
 ```
 
 ## Swap A Model
