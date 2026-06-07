@@ -3,6 +3,7 @@
 from core.observability.cost_tracker import CostRecord, CostTracker, ProviderPricing
 from core.observability.rate_limiter import RateLimitStrategy, RateLimiter, ProviderRateLimits
 from core.observability.circuit_breaker import CircuitState, CircuitBreakerStats, CircuitOpenError, CircuitBreaker
+from core.observability.performance_monitor import PerformanceMonitor
 
 __all__ = [
     "CostRecord",
@@ -15,6 +16,7 @@ __all__ = [
     "CircuitBreakerStats",
     "CircuitOpenError",
     "CircuitBreaker",
+    "PerformanceMonitor",
 ]
 
 

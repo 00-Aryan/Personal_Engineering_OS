@@ -54,7 +54,7 @@ Never start a task without reading all existing code first.
 - TASK_39: DONE (Real API Key Wiring + Live Provider Validation - 320 tests green)
 - TASK_40: DONE (Dogfood — Run ProjectOS on ProjectOS)
 - TASK_41: DONE (Process a Real External Project)
-- TASK_42: PENDING (Performance Profiling + Real Bottleneck Analysis)
+- TASK_42: DONE (Performance Profiling + Real Bottleneck Analysis)
 - TASK_43: PENDING (Configuration Consolidation)
 - TASK_44: PENDING (Phase 6 Hardening + Real-World Fixes)
 

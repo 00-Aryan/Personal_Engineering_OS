@@ -50,3 +50,10 @@ uv run --no-sync python scripts/intelligence_smoke.py
 - Start next task without completing current one
 - Add dependencies not in task specification
 - Use LangChain, CrewAI, or any agent framework
+
+## Script Safety Rules (Added Phase 6)
+- NEVER call ProjectOS.start() from any script — it blocks forever
+- NEVER call run_for_duration() without signal.alarm() hard timeout
+- ALL scripts must have signal.alarm(N) wall clock timeout
+- ALL scripts must exit with sys.exit(0) or sys.exit(1) — never hang
+- Profile/benchmark scripts use direct component calls, not daemon start

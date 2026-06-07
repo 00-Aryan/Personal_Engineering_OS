@@ -28,7 +28,8 @@ from core.evaluation.quality_scorer import QualityScorer
 from core.evaluation.regression_detector import RegressionDetector
 from core.evaluation.static_analyzer import StaticAnalyzer
 from core.events import AgentEvent, AgentResult, EventType
-from core.observability.tracer import TraceStore, SpanStatus, Span
+from core.observability.tracer import Tracer, TraceStore, SpanStatus, Span
+from core.observability.performance_monitor import PerformanceMonitor
 from core.observability.token_budget import TokenBudget
 from core.observability.cost_tracker import CostTracker
 from core.observability.alerting import AlertManager, AlertSeverity
@@ -968,6 +969,74 @@ def trace_slow(ctx: click.Context, threshold: int) -> None:
     for t in slow_traces:
         short_id = t["trace_id"][:8]
         click.echo(f"{short_id:<12} | {t['event_type']:<20} | {f'{t['total_duration_ms']}ms':<11} | {t['span_count']:<10}")
+
+
+@cli.group(name="perf")
+def perf_group() -> None:
+    """Analyze and monitor ProjectOS performance."""
+    pass
+
+
+def _performance_monitor(ctx: click.Context) -> PerformanceMonitor:
+    project_root = _project_root(ctx)
+    state_dir = project_root / STATE_DIR_PATH
+    store = TraceStore(state_dir)
+    tracer = Tracer(store)
+    return PerformanceMonitor(tracer, state_dir)
+
+
+@perf_group.command(name="stats")
+@click.pass_context
+def perf_stats(ctx: click.Context) -> None:
+    """Show ComponentStats table for all components."""
+    monitor = _performance_monitor(ctx)
+    stats = monitor.get_component_stats()
+    if not stats:
+        click.echo("No performance stats found.")
+        return
+    click.echo(f"{'component':<25} | {'calls':<5} | {'avg_ms':<8} | {'p50_ms':<8} | {'p95_ms':<8} | {'max_ms':<8}")
+    click.echo("-" * 75)
+    for comp in sorted(stats.keys()):
+        stat = stats[comp]
+        click.echo(
+            f"{stat.component:<25} | "
+            f"{stat.call_count:<5} | "
+            f"{stat.avg_duration_ms:<8.1f} | "
+            f"{stat.p50_duration_ms:<8.1f} | "
+            f"{stat.p95_duration_ms:<8.1f} | "
+            f"{stat.max_duration_ms:<8.1f}"
+        )
+
+
+@perf_group.command(name="slow")
+@click.option("--threshold", type=int, default=500, show_default=True)
+@click.pass_context
+def perf_slow(ctx: click.Context, threshold: int) -> None:
+    """Show operations slower than threshold."""
+    monitor = _performance_monitor(ctx)
+    slow_ops = monitor.get_slow_operations(threshold_ms=threshold)
+    if not slow_ops:
+        click.echo(f"No operations slower than {threshold}ms found.")
+        return
+    click.echo(f"{'trace_id':<12} | {'component':<20} | {'operation':<25} | {'duration_ms':<11} | {'status':<8}")
+    click.echo("-" * 82)
+    for span in slow_ops:
+        short_id = span.trace_id[:8]
+        dur = f"{span.duration_ms}ms" if span.duration_ms is not None else "N/A"
+        click.echo(f"{short_id:<12} | {span.component:<20} | {span.operation_name:<25} | {dur:<11} | {span.status.value.upper():<8}")
+
+
+@perf_group.command(name="suggest")
+@click.pass_context
+def perf_suggest(ctx: click.Context) -> None:
+    """Show optimization suggestions."""
+    monitor = _performance_monitor(ctx)
+    suggestions = monitor.suggest_optimizations()
+    if not suggestions:
+        click.echo("No optimization suggestions.")
+        return
+    for suggestion in suggestions:
+        click.echo(f"- {suggestion}")
 
 
 def _project_root(ctx: click.Context) -> Path:

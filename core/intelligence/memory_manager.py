@@ -46,6 +46,7 @@ class MemoryManager:
         self.memory_store = memory_store
         self.embedder = embedder
         self.tracer = tracer
+        self._recall_cache = {}
 
     def remember_decision(
         self,
@@ -121,6 +122,14 @@ class MemoryManager:
         k: int = DEFAULT_RECALL_K,
     ) -> str:
         """Return formatted memories relevant to one agent query."""
+        import time
+        cache_key = f"{agent_name}:{query[:50]}"
+        now = time.time()
+        if cache_key in self._recall_cache:
+            timestamp, cached_result = self._recall_cache[cache_key]
+            if now - timestamp < 60:
+                return cached_result
+
         span = self.tracer.start_span("memory.recall", component="memory_manager") if self.tracer else None
         try:
             memories = self.memory_store.retrieve(query, agent_name, k=k)
@@ -131,12 +140,15 @@ class MemoryManager:
                 })
                 span.finish(SpanStatus.OK)
             if not memories:
-                return ""
-            return NEWLINE.join(
-                [EXPERIENCE_HEADER]
-                + [memory.to_retrieval_text() for memory in memories]
-                + [EXPERIENCE_FOOTER]
-            )
+                res = ""
+            else:
+                res = NEWLINE.join(
+                    [EXPERIENCE_HEADER]
+                    + [memory.to_retrieval_text() for memory in memories]
+                    + [EXPERIENCE_FOOTER]
+                )
+            self._recall_cache[cache_key] = (now, res)
+            return res
         except Exception as e:
             if span:
                 span.finish(SpanStatus.ERROR, error=str(e))
