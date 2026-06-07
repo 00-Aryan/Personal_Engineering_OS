@@ -142,10 +142,20 @@ class ModelProvider(ABC):
 
     def _load_config(self, config_path: Path) -> Mapping[str, Any]:
         """Read and validate the YAML model configuration file."""
+        if config_path.name == "models.yaml":
+            sibling_projectos = config_path.parent / "projectos.yaml"
+            if sibling_projectos.exists():
+                import logging
+                logging.getLogger("projectos.model_provider").warning(
+                    "config/models.yaml is deprecated. Please use config/projectos.yaml instead."
+                )
         with config_path.open("r", encoding="utf-8") as config_file:
             config = yaml.safe_load(config_file)
         if not isinstance(config, Mapping):
             raise ModelProviderConfigError("Model config must be a mapping.")
+        if "project" in config or config.get("version") == "0.3.0" or "token_budgets" in config:
+            from core.config_loader import adapt_to_legacy_config
+            config = adapt_to_legacy_config(config)
         return config
 
     def _load_provider_config(self) -> Mapping[str, Any]:
@@ -266,6 +276,13 @@ class OpenRouterProvider(ModelProvider):
         circuit_breaker: Optional[Any] = None,
     ) -> str:
         """Return a complete response from OpenRouter."""
+        from core.observability.token_budget import _local
+        event_id = getattr(_local, "current_task_id", None)
+        if event_id:
+            from core.task_queue import record_model_call
+            if not record_model_call(event_id, self._project_root()):
+                return f"MODEL_CALL_BLOCKED: Event [{event_id}] blocked: exceeded max model calls (5)"
+
         tb = token_budget or getattr(self, "token_budget", None)
         a_name = agent_name or self._agent_name or "default"
         if tb:
@@ -466,6 +483,13 @@ class GeminiProvider(ModelProvider):
         circuit_breaker: Optional[Any] = None,
     ) -> str:
         """Return a complete response from Gemini."""
+        from core.observability.token_budget import _local
+        event_id = getattr(_local, "current_task_id", None)
+        if event_id:
+            from core.task_queue import record_model_call
+            if not record_model_call(event_id, self._project_root()):
+                return f"MODEL_CALL_BLOCKED: Event [{event_id}] blocked: exceeded max model calls (5)"
+
         tb = token_budget or getattr(self, "token_budget", None)
         a_name = agent_name or self._agent_name or "default"
         if tb:
@@ -662,6 +686,13 @@ class OllamaProvider(ModelProvider):
         circuit_breaker: Optional[Any] = None,
     ) -> str:
         """Return a complete response from Ollama."""
+        from core.observability.token_budget import _local
+        event_id = getattr(_local, "current_task_id", None)
+        if event_id:
+            from core.task_queue import record_model_call
+            if not record_model_call(event_id, self._project_root()):
+                return f"MODEL_CALL_BLOCKED: Event [{event_id}] blocked: exceeded max model calls (5)"
+
         tb = token_budget or getattr(self, "token_budget", None)
         a_name = agent_name or self._agent_name or "default"
         if tb:

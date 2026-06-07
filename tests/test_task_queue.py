@@ -120,6 +120,32 @@ class TaskQueueTestCase(unittest.TestCase):
             blocked_by=blocked_by,
         )
 
+    def test_event_call_count_loop_prevention(self) -> None:
+        """Verify that record_model_call tracks count and blocks after 5 calls, escalating."""
+        import tempfile
+        import shutil
+        from pathlib import Path
+        from core.task_queue import record_model_call, event_call_counts
+        
+        temp_dir = tempfile.mkdtemp()
+        project_root = Path(temp_dir)
+        try:
+            event_id = "test-event-loop-123"
+            event_call_counts.pop(event_id, None)
+            
+            for _ in range(5):
+                self.assertTrue(record_model_call(event_id, project_root))
+                
+            self.assertFalse(record_model_call(event_id, project_root))
+            
+            escalation_file = project_root / "escalation_queue.md"
+            self.assertTrue(escalation_file.exists())
+            content = escalation_file.read_text(encoding="utf-8")
+            self.assertIn("potential_reasoning_loop", content)
+            self.assertIn(event_id, content)
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

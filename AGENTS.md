@@ -57,3 +57,8 @@ uv run --no-sync python scripts/intelligence_smoke.py
 - ALL scripts must have signal.alarm(N) wall clock timeout
 - ALL scripts must exit with sys.exit(0) or sys.exit(1) — never hang
 - Profile/benchmark scripts use direct component calls, not daemon start
+
+## Test Performance Rules
+- No single test may take > 10 seconds
+- Tests that call scripts/ must use subprocess timeout=30
+- Never call ProjectOS.start() or run_for_duration() in tests

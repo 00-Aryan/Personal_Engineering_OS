@@ -119,7 +119,29 @@ class TokenBudget:
         self.log_path = self.state_dir / "token_usage.jsonl"
         self.budgets = dict(self.DEFAULT_BUDGETS)
         if budgets:
-            self.budgets.update(budgets)
+            for agent, limits in budgets.items():
+                mapped_limits = {}
+                if "soft" in limits:
+                    mapped_limits["soft_limit_per_call"] = limits["soft"]
+                if "soft_limit_per_call" in limits:
+                    mapped_limits["soft_limit_per_call"] = limits["soft_limit_per_call"]
+
+                if "hard" in limits:
+                    mapped_limits["hard_limit_per_call"] = limits["hard"]
+                if "hard_limit_per_call" in limits:
+                    mapped_limits["hard_limit_per_call"] = limits["hard_limit_per_call"]
+
+                if "daily" in limits:
+                    mapped_limits["daily_limit"] = limits["daily"]
+                if "daily_limit" in limits:
+                    mapped_limits["daily_limit"] = limits["daily_limit"]
+
+                if agent in self.budgets:
+                    self.budgets[agent].update(mapped_limits)
+                else:
+                    default_lims = dict(self.DEFAULT_BUDGETS.get("default", {}))
+                    default_lims.update(mapped_limits)
+                    self.budgets[agent] = default_lims
         self._lock = threading.Lock()
         self._daily_cache: Dict[str, int] = {}
         self._cached_date: Optional[date] = None

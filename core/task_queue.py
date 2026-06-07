@@ -216,4 +216,68 @@ class TaskQueue:
         return event.correlation_id or event.event_id
 
 
-__all__ = ["BlockedTask", "TaskQueue"]
+# Thread-safe event call count dictionary and lock for reasoning loop protection
+event_call_counts: dict[str, int] = {}
+event_call_counts_lock = threading.Lock()
+
+
+def record_model_call(event_id: str, project_root: Path) -> bool:
+    """Record a model call for a given event ID.
+    
+    If the call count exceeds 5, block further calls, log warning,
+    and write to the escalation queue.
+    
+    Returns True if the call is allowed, False if blocked.
+    """
+    global event_call_counts
+    with event_call_counts_lock:
+        count = event_call_counts.get(event_id, 0) + 1
+        event_call_counts[event_id] = count
+        
+    if count > 5:
+        logger = logging.getLogger(LOGGER_NAME)
+        logger.warning("Event [%s] blocked: exceeded max model calls (5)", event_id)
+        
+        # Write to escalation queue (potential_reasoning_loop escalation)
+        escalation_queue_path = project_root / "escalation_queue.md"
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).isoformat()
+        reason = "potential_reasoning_loop"
+        row = f"| {timestamp} | {event_id} | {reason} | PENDING |\n"
+        
+        try:
+            if not escalation_queue_path.exists():
+                header = "| Timestamp | Event ID | Reason | Status |\n|---|---|---|---|\n"
+                _write_atomically_task_queue(escalation_queue_path, header)
+            _append_atomically_task_queue(escalation_queue_path, row)
+        except Exception as e:
+            logger.exception("Failed to write to escalation queue: %s", e)
+            
+        return False
+        
+    return True
+
+
+def _write_atomically_task_queue(path: Path, content: str) -> None:
+    import tempfile
+    import os
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+        raise
+
+
+def _append_atomically_task_queue(path: Path, content: str) -> None:
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    _write_atomically_task_queue(path, f"{existing}{content}")
+
+
+__all__ = ["BlockedTask", "TaskQueue", "record_model_call"]

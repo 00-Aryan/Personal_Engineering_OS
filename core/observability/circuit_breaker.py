@@ -54,17 +54,40 @@ class CircuitOpenError(Exception):
 class CircuitBreaker:
     """Monitors failures for a provider and blocks calls if failure threshold is reached."""
 
+    DEFAULT_FAILURE_THRESHOLD = 5
+    DEFAULT_RECOVERY_TIMEOUT = 60.0
+
     def __init__(
         self,
         provider_name: str,
-        failure_threshold: int = 5,
-        recovery_timeout: float = 60.0,
+        failure_threshold: Optional[int] = None,
+        recovery_timeout: Optional[float] = None,
         state_dir: Optional[Path] = None,
+        minimum_open_duration: Optional[float] = None,
+        consecutive_success_threshold: Optional[int] = None,
     ) -> None:
         """Initialize the circuit breaker and load persisted state if any."""
         self.provider_name = provider_name
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
+        self.failure_threshold = (
+            failure_threshold
+            if failure_threshold is not None
+            else self.DEFAULT_FAILURE_THRESHOLD
+        )
+        self.recovery_timeout = (
+            recovery_timeout
+            if recovery_timeout is not None
+            else self.DEFAULT_RECOVERY_TIMEOUT
+        )
+        self.minimum_open_duration = (
+            minimum_open_duration
+            if minimum_open_duration is not None
+            else 30.0
+        )
+        self.consecutive_success_threshold = (
+            consecutive_success_threshold
+            if consecutive_success_threshold is not None
+            else 3
+        )
         self.state_dir = Path(state_dir) if state_dir else Path.cwd() / ".projectos_state"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.state_dir / f"circuit_state_{provider_name}.json"
@@ -159,9 +182,11 @@ class CircuitBreaker:
             now = datetime.now(timezone.utc)
 
             if self.state == CircuitState.OPEN:
-                if self.opened_at and (now - self.opened_at).total_seconds() >= self.recovery_timeout:
+                elapsed = (now - self.opened_at).total_seconds() if self.opened_at else 0.0
+                if elapsed >= self.recovery_timeout and elapsed >= self.minimum_open_duration:
                     old_state = self.state
                     self.state = CircuitState.HALF_OPEN
+                    self.success_count = 0
                     self._log_transition_locked(old_state, self.state, "recovery timeout elapsed")
                     self._save_state_locked()
                 else:
@@ -222,9 +247,10 @@ class CircuitBreaker:
         self.failure_count = 0
 
         if self.state == CircuitState.HALF_OPEN:
-            old_state = self.state
-            self.state = CircuitState.CLOSED
-            self._log_transition_locked(old_state, self.state, "probe call succeeded")
+            if self.success_count >= self.consecutive_success_threshold:
+                old_state = self.state
+                self.state = CircuitState.CLOSED
+                self._log_transition_locked(old_state, self.state, f"{self.consecutive_success_threshold} consecutive successes in HALF_OPEN")
 
         self._save_state_locked()
 

@@ -113,12 +113,20 @@ class AlertManager:
         self,
         state_dir: Path,
         rules: Optional[List[AlertRule]] = None,
+        alerts_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self.state_dir / "alerts.jsonl"
         self._lock = threading.Lock()
         
+        self.alerts_config = alerts_config or {}
+        self.daily_cost_inr_threshold = float(self.alerts_config.get("daily_cost_inr_threshold", 100.0))
+        self.monthly_cost_inr_threshold = float(self.alerts_config.get("monthly_cost_inr_threshold", 2000.0))
+        self.quality_score_minimum = float(self.alerts_config.get("quality_score_minimum", 0.60))
+        self.blocked_queue_max = int(self.alerts_config.get("blocked_queue_max", 10))
+        self.evaluation_failure_rate_max = float(self.alerts_config.get("evaluation_failure_rate_max", 0.30))
+
         self.token_budget = TokenBudget(self.state_dir)
         self.cost_tracker = CostTracker(self.state_dir)
         from core.evaluation.evaluation_store import EvaluationStore
@@ -196,16 +204,16 @@ class AlertManager:
             for agent_name, scores in agent_scores.items():
                 if len(scores) >= 10:
                     avg = sum(scores) / len(scores)
-                    if avg < 0.60:
+                    if avg < self.quality_score_minimum:
                         alerts.append(Alert(
                             alert_id=str(uuid.uuid4()),
                             alert_type=AlertType.QUALITY_REGRESSION,
                             severity=AlertSeverity.CRITICAL,
                             title=f"Quality regression: {agent_name}",
-                            message=f"Agent {agent_name} average score is {avg:.2f} (< 0.60) over {len(scores)} evaluations",
+                            message=f"Agent {agent_name} average score is {avg:.2f} (< {self.quality_score_minimum:.2f}) over {len(scores)} evaluations",
                             component=agent_name,
                             metric_value=avg,
-                            threshold=0.60,
+                            threshold=self.quality_score_minimum,
                             timestamp=datetime.now(timezone.utc),
                         ))
         except Exception:
@@ -243,16 +251,7 @@ class AlertManager:
         try:
             daily_cost = self.cost_tracker.get_daily_cost()
             total_inr = daily_cost.get("total_inr", 0.0)
-            threshold = 100.0
-            config_path = self.state_dir.parent / "config" / "models.yaml"
-            if config_path.exists():
-                try:
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        cfg = yaml.safe_load(f)
-                        if isinstance(cfg, dict):
-                            threshold = float(cfg.get("pricing", {}).get("alert_threshold_daily_inr", 100.0))
-                except Exception:
-                    pass
+            threshold = self.daily_cost_inr_threshold
             
             if total_inr > threshold:
                 return Alert(
@@ -402,16 +401,16 @@ class AlertManager:
                     if parts:
                         count += 1
             
-            if count > 10:
+            if count > self.blocked_queue_max:
                 return Alert(
                     alert_id=str(uuid.uuid4()),
                     alert_type=AlertType.BLOCKED_TASK_QUEUE_GROWING,
                     severity=AlertSeverity.WARNING,
                     title="Blocked task queue growing",
-                    message=f"Blocked tasks count is {count} (> 10)",
+                    message=f"Blocked tasks count is {count} (> {self.blocked_queue_max})",
                     component="task_queue",
                     metric_value=float(count),
-                    threshold=10.0,
+                    threshold=float(self.blocked_queue_max),
                     timestamp=datetime.now(timezone.utc),
                 )
         except Exception:
@@ -445,16 +444,18 @@ class AlertManager:
             block_count = sum(1 for d in recent_decisions if d == "BLOCK")
             block_rate = (block_count / len(recent_decisions)) * 100.0
             
-            if block_rate > 30.0:
+            threshold = self.evaluation_failure_rate_max
+            threshold_pct = threshold * 100.0 if threshold <= 1.0 else threshold
+            if block_rate > threshold_pct:
                 return Alert(
                     alert_id=str(uuid.uuid4()),
                     alert_type=AlertType.EVALUATION_FAILURE_RATE_HIGH,
                     severity=AlertSeverity.WARNING,
                     title="High evaluation failure rate",
-                    message=f"Gate block rate is {block_rate:.1f}% in last {len(recent_decisions)} decisions (> 30%)",
+                    message=f"Gate block rate is {block_rate:.1f}% in last {len(recent_decisions)} decisions (> {threshold_pct:.1f}%)",
                     component="quality_gate",
                     metric_value=block_rate,
-                    threshold=30.0,
+                    threshold=threshold_pct,
                     timestamp=datetime.now(timezone.utc),
                 )
         except Exception:

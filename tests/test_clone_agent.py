@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Mapping
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from core.clone_agent import CloneAgent, DecisionCategory
 from core.events import AgentEvent, EventType
@@ -179,6 +179,19 @@ class CloneAgentTestCase(unittest.TestCase):
     def _read_file(self, file_name: str) -> str:
         """Read a file from the isolated project root."""
         return (self.project_root / file_name).read_text(encoding=TEST_ENCODING)
+
+    @patch("time.sleep")
+    def test_clone_agent_throttling_high_rate(self, sleep_mock: Any) -> None:
+        """Verify that CloneAgent dispatch throttles when rate is > 20 events/min."""
+        import time
+        event = self._event(EventType.DOCS_UPDATED)
+        
+        # Populate with 21 timestamps to exceed 20 limit
+        self.agent._processed_timestamps = [time.perf_counter()] * 21
+        
+        self.agent.dispatch(event)
+        
+        sleep_mock.assert_called_once_with(3.0)
 
 
 if __name__ == "__main__":

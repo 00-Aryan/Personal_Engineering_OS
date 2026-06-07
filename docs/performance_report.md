@@ -1,5 +1,5 @@
 # Performance Profile Report
-Date: 2026-06-07T12:47:50.070761+00:00
+Date: 2026-06-07T20:10:13.407949+00:00
 Source: existing_traces
 Provider: mock (no real API keys available)
 

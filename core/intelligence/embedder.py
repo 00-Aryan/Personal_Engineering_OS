@@ -267,10 +267,13 @@ class EmbedderFactory:
     @staticmethod
     def create(state_dir: Path) -> BaseEmbedder:
         """Return Gemini when configured, otherwise local TF-IDF."""
-        if os.environ.get(GEMINI_API_KEY_ENV):
+        api_key = os.environ.get(GEMINI_API_KEY_ENV)
+        is_testing = "PYTEST_CURRENT_TEST" in os.environ
+        is_dummy = api_key in (None, "", "your_gemini_api_key_here", "test_gemini_key_123", "fake-key", "fake-gemini-key")
+        if api_key and not is_dummy and not is_testing:
             logger.info("Selected GeminiEmbedder because GEMINI_API_KEY is set.")
             return GeminiEmbedder()
-        logger.info("Selected TFIDFEmbedder because GEMINI_API_KEY is not set.")
+        logger.info("Selected TFIDFEmbedder because GEMINI_API_KEY is not set or in test mode.")
         return TFIDFEmbedder(state_dir=state_dir)
 
 

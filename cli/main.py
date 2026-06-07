@@ -1970,6 +1970,113 @@ def alerts_anomalies(ctx: click.Context) -> None:
         click.secho("✓ No anomalies detected.", fg="green")
 
 
+@cli.group(name="config")
+def config_group() -> None:
+    """Manage ProjectOS configuration."""
+    pass
+
+
+@config_group.command(name="show")
+@click.pass_context
+def config_show(ctx: click.Context) -> None:
+    """Pretty-print the current configuration from projectos.yaml."""
+    project_root = _project_root(ctx)
+    config_path = project_root / "config" / "projectos.yaml"
+    if not config_path.exists():
+        click.secho(f"Configuration file not found at {config_path}", fg="red")
+        return
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            content = f.read()
+        click.echo(content)
+    except Exception as e:
+        raise click.ClickException(f"Error reading configuration: {e}")
+
+
+@config_group.command(name="validate")
+@click.pass_context
+def config_validate(ctx: click.Context) -> None:
+    """Validate the current projectos.yaml configuration."""
+    project_root = _project_root(ctx)
+    config_path = project_root / "config" / "projectos.yaml"
+    if not config_path.exists():
+        click.secho(f"Configuration file not found at {config_path}", fg="red")
+        raise click.ClickException("Missing config file")
+    try:
+        from core.config_loader import ProjectConfig as MasterProjectConfig
+        config = MasterProjectConfig.load(config_path)
+        errors = config.validate()
+        if errors:
+            click.secho("Configuration has validation errors:", fg="red")
+            for err in errors:
+                click.echo(f"- {err}")
+            ctx.exit(1)
+        else:
+            click.secho("Config valid", fg="green")
+    except Exception as e:
+        click.secho(f"Validation failed: {e}", fg="red")
+        ctx.exit(1)
+
+
+@config_group.command(name="init")
+@click.pass_context
+def config_init(ctx: click.Context) -> None:
+    """Initialize projectos.yaml and prompt for API keys."""
+    project_root = _project_root(ctx)
+    config_dir = project_root / "config"
+    config_path = config_dir / "projectos.yaml"
+    env_path = project_root / ".env"
+    
+    from core.config_loader import ProjectConfig as MasterProjectConfig
+    
+    if not config_path.exists():
+        click.echo(f"Creating default configuration at {config_path}...")
+        MasterProjectConfig.create_default(config_path)
+    else:
+        click.echo(f"Configuration file already exists at {config_path}.")
+        
+    gemini_key = click.prompt("Enter GEMINI_API_KEY (press Enter to skip)", default="", show_default=False)
+    openrouter_key = click.prompt("Enter OPENROUTER_API_KEY (press Enter to skip)", default="", show_default=False)
+    
+    env_content = ""
+    if env_path.exists():
+        try:
+            env_content = env_path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+            
+    lines = env_content.splitlines()
+    new_lines = []
+    has_gemini = False
+    has_or = False
+    for line in lines:
+        if line.startswith("GEMINI_API_KEY="):
+            if gemini_key:
+                new_lines.append(f"GEMINI_API_KEY={gemini_key}")
+            else:
+                new_lines.append(line)
+            has_gemini = True
+        elif line.startswith("OPENROUTER_API_KEY="):
+            if openrouter_key:
+                new_lines.append(f"OPENROUTER_API_KEY={openrouter_key}")
+            else:
+                new_lines.append(line)
+            has_or = True
+        else:
+            new_lines.append(line)
+            
+    if not has_gemini and gemini_key:
+        new_lines.append(f"GEMINI_API_KEY={gemini_key}")
+    if not has_or and openrouter_key:
+        new_lines.append(f"OPENROUTER_API_KEY={openrouter_key}")
+        
+    try:
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        click.echo(f"Updated environment variables in {env_path}")
+    except Exception as e:
+        click.secho(f"Failed to write .env file: {e}", fg="red")
+
+
 if __name__ == "__main__":
     cli()
 

@@ -234,7 +234,7 @@ def test_profile_script_exits_cleanly() -> None:
         [sys.executable, "scripts/profile_session.py"],
         capture_output=True,
         text=True,
-        timeout=90,
+        timeout=30,
     )
     assert result.returncode == 0
     assert "PROFILE COMPLETE" in result.stdout or "PROFILE: Wall clock timeout reached" in result.stdout
@@ -253,7 +253,7 @@ def test_report_written_after_profile_run() -> None:
         [sys.executable, "scripts/profile_session.py"],
         capture_output=True,
         text=True,
-        timeout=90,
+        timeout=30,
     )
     
     assert result.returncode == 0

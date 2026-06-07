@@ -8,6 +8,7 @@ import tempfile
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+import threading
 from time import perf_counter
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, TYPE_CHECKING
 
@@ -277,6 +278,8 @@ class CloneAgent(BaseAgent):
         self.tracer = tracer
         self.decision_logger = DecisionLogger(self.project_root)
         self._ensure_project_files()
+        self._processed_timestamps: List[float] = []
+        self._processed_lock = threading.Lock()
 
     def classify_decision(self, event: AgentEvent) -> DecisionCategory:
         """Classify an incoming event into a Clone decision category."""
@@ -331,6 +334,18 @@ class CloneAgent(BaseAgent):
 
     def dispatch(self, event: AgentEvent) -> List[AgentEvent]:
         """Create and optionally submit child events for responsible agents."""
+        import time
+        from time import perf_counter
+        now = perf_counter()
+        with self._processed_lock:
+            self._processed_timestamps = [t for t in self._processed_timestamps if now - t < 60.0]
+            event_rate = len(self._processed_timestamps)
+            self._processed_timestamps.append(now)
+
+        if event_rate > 20:
+            self.logger.warning("High event rate detected, throttling")
+            time.sleep(3.0)
+
         span = self.tracer.start_span("clone.dispatch", component="clone") if self.tracer else None
         try:
             targets = self._dispatch_targets(event)

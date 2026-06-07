@@ -148,8 +148,8 @@ def test_scenario_c(tmp_path: Path) -> None:
 
 def test_scenario_d(tmp_path: Path) -> None:
     print("Running Test Scenario D: Circuit Breaker...")
-    # 1. Initialize CircuitBreaker(failure_threshold=3, recovery_timeout=1.0)
-    cb = CircuitBreaker("smoke-provider", failure_threshold=3, recovery_timeout=1.0, state_dir=tmp_path)
+    # 1. Initialize CircuitBreaker(failure_threshold=3, recovery_timeout=1.0, minimum_open_duration=0.0, consecutive_success_threshold=1)
+    cb = CircuitBreaker("smoke-provider", failure_threshold=3, recovery_timeout=1.0, state_dir=tmp_path, minimum_open_duration=0.0, consecutive_success_threshold=1)
     
     # 2. Trigger 3 consecutive failures
     def failing_fn():

@@ -89,6 +89,7 @@ class TestAgentTestCase(unittest.TestCase):
             cwd=self.project_root,
             capture_output=True,
             text=True,
+            timeout=30,
         )
 
     @patch("agents.test_agent.subprocess.run")
@@ -148,6 +149,48 @@ class TestAgentTestCase(unittest.TestCase):
             stdout=stdout,
             stderr="",
         )
+
+    @patch("agents.test_agent.subprocess.run")
+    def test_blocked_dangerous_pattern_skips_execution(self, run_mock: Any) -> None:
+        """Verify that a blocked pattern skips pytest execution and writes warning."""
+        self.model_provider.complete.return_value = (
+            "import os\n"
+            "def test_dangerous() -> None:\n"
+            "    os.system('rm -rf /')\n"
+        )
+        result = self.agent.handle(self._code_event())
+        
+        run_mock.assert_not_called()
+        self.assertTrue(result.success)
+        self.assertTrue(result.escalate)
+        self.assertEqual(result.escalation_reason, "Test execution blocked: dangerous pattern detected")
+        self.assertTrue(result.output.get("blocked"))
+        self.assertIn("os.system", result.output.get("blocked_reasons", []))
+        
+        reviews_dir = self.project_root / "reviews"
+        self.assertTrue(reviews_dir.exists())
+        reports = list(reviews_dir.glob("example.py*_review.md"))
+        self.assertEqual(len(reports), 1)
+        report_content = reports[0].read_text(encoding=TEST_ENCODING)
+        self.assertIn("WARNING: Test Execution Blocked", report_content)
+        self.assertIn("Blocked patterns**: os.system", report_content)
+        self.assertIn("Flagged patterns**: import os", report_content)
+
+    @patch("agents.test_agent.subprocess.run")
+    def test_flagged_allowed_pattern_does_not_skip(self, run_mock: Any) -> None:
+        """Verify that a flagged-but-allowed pattern runs pytest normally."""
+        self.model_provider.complete.return_value = (
+            "import os\n"
+            "def test_allowed() -> None:\n"
+            "    assert os.path.exists('foo')\n"
+        )
+        run_mock.return_value = self._completed_process(PASSING_OUTPUT)
+        
+        result = self.agent.handle(self._code_event())
+        
+        run_mock.assert_called_once()
+        self.assertTrue(result.success)
+        self.assertFalse(result.escalate)
 
 
 if __name__ == "__main__":

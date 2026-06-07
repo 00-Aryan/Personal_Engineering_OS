@@ -94,6 +94,8 @@ def test_transitions_to_half_open_after_timeout(temp_state_dir):
         failure_threshold=1,
         recovery_timeout=0.1,
         state_dir=temp_state_dir,
+        minimum_open_duration=0.0,
+        consecutive_success_threshold=1,
     )
 
     # Force open
@@ -118,6 +120,8 @@ def test_half_open_closes_on_success(temp_state_dir):
         failure_threshold=1,
         recovery_timeout=0.1,
         state_dir=temp_state_dir,
+        minimum_open_duration=0.0,
+        consecutive_success_threshold=1,
     )
 
     # Open it
@@ -139,6 +143,8 @@ def test_half_open_reopens_on_failure(temp_state_dir):
         failure_threshold=1,
         recovery_timeout=0.1,
         state_dir=temp_state_dir,
+        minimum_open_duration=0.0,
+        consecutive_success_threshold=1,
     )
 
     # Open it
@@ -160,6 +166,8 @@ def test_reset_returns_to_closed(temp_state_dir):
         failure_threshold=1,
         recovery_timeout=1.0,
         state_dir=temp_state_dir,
+        minimum_open_duration=0.0,
+        consecutive_success_threshold=1,
     )
 
     try:
@@ -180,9 +188,80 @@ def test_stats_accurate_throughout_lifecycle(temp_state_dir):
         failure_threshold=2,
         recovery_timeout=1.0,
         state_dir=temp_state_dir,
+        minimum_open_duration=0.0,
+        consecutive_success_threshold=1,
     )
     cb.call(lambda: "ok")
     stats = cb.get_stats()
     assert stats.total_requests == 1
     assert stats.success_count == 1
     assert stats.blocked_requests == 0
+
+
+def test_minimum_open_duration_prevents_half_open(temp_state_dir):
+    """Verify that minimum open duration keeps the circuit open even after recovery timeout."""
+    cb = CircuitBreaker(
+        provider_name="test-provider",
+        failure_threshold=1,
+        recovery_timeout=0.1,
+        state_dir=temp_state_dir,
+        minimum_open_duration=1.0,
+        consecutive_success_threshold=1,
+    )
+
+    # Force open
+    try:
+        cb.call(lambda: exec("raise ValueError()") or None)
+    except ValueError:
+        pass
+    assert cb.state == CircuitState.OPEN
+
+    # Sleep past recovery_timeout but not minimum_open_duration
+    time.sleep(0.15)
+
+    # Next call should fail with CircuitOpenError
+    with pytest.raises(CircuitOpenError):
+        cb.call(lambda: "should-block")
+    assert cb.state == CircuitState.OPEN
+
+    # Sleep past minimum_open_duration
+    time.sleep(0.9)
+    res = cb.call(lambda: "ok")
+    assert res == "ok"
+    assert cb.state == CircuitState.CLOSED
+
+
+def test_multiple_successes_required_to_close(temp_state_dir):
+    """Verify that consecutive_success_threshold successes are needed to transition to CLOSED."""
+    cb = CircuitBreaker(
+        provider_name="test-provider",
+        failure_threshold=1,
+        recovery_timeout=0.05,
+        state_dir=temp_state_dir,
+        minimum_open_duration=0.0,
+        consecutive_success_threshold=3,
+    )
+
+    # Force open
+    try:
+        cb.call(lambda: exec("raise ValueError()") or None)
+    except ValueError:
+        pass
+    assert cb.state == CircuitState.OPEN
+
+    time.sleep(0.06)
+
+    # First success transitions to HALF_OPEN but doesn't close
+    res = cb.call(lambda: "success1")
+    assert res == "success1"
+    assert cb.state == CircuitState.HALF_OPEN
+
+    # Second success stays HALF_OPEN
+    res = cb.call(lambda: "success2")
+    assert res == "success2"
+    assert cb.state == CircuitState.HALF_OPEN
+
+    # Third success closes circuit
+    res = cb.call(lambda: "success3")
+    assert res == "success3"
+    assert cb.state == CircuitState.CLOSED

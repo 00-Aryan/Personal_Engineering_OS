@@ -62,7 +62,7 @@ from core.task_queue import TaskQueue
 from core.trigger_system import TriggerSystem
 
 
-DEFAULT_CONFIG_PATH = Path("config/models.yaml")
+DEFAULT_CONFIG_PATH = Path("config/projectos.yaml")
 CONFIG_DIR_NAME = "config"
 DECISIONS_LOG_NAME = "decisions.log"
 STATE_DIR_NAME = ".projectos_state"
@@ -162,7 +162,7 @@ class ProjectOS:
 
     def __init__(
         self,
-        config_path: Path | str = DEFAULT_CONFIG_PATH,
+        config_path: Path = DEFAULT_CONFIG_PATH,
         provider_factory: Optional[ProviderFactory] = None,
         project_root: Optional[Path | str] = None,
         state_dir: Optional[Path | str] = None,
@@ -172,36 +172,83 @@ class ProjectOS:
     ) -> None:
         """Load configuration and initialize ProjectOS runtime components."""
         self.config_path = Path(config_path)
-        self.project_root = (
-            Path(project_root).resolve()
-            if project_root is not None
-            else self._project_root_for_config(self.config_path)
-        )
-        self.project_name = project_name or self.project_root.name
-        self.state_dir = (
-            Path(state_dir).resolve()
-            if state_dir is not None
-            else self.project_root / STATE_DIR_NAME
-        )
-        self.watch_patterns = watch_patterns
-        self.ignore_patterns = ignore_patterns
+        
+        is_new_config = False
+        master_config = None
+        if self.config_path.exists():
+            try:
+                with self.config_path.open("r", encoding=ENCODING) as f:
+                    peek = yaml.safe_load(f)
+                if isinstance(peek, dict) and ("project" in peek or peek.get("version") == "0.3.0" or "token_budgets" in peek):
+                    is_new_config = True
+            except Exception:
+                pass
+
+        if is_new_config:
+            from core.config_loader import ProjectConfig as MasterProjectConfig
+            env_file = (Path(project_root) if project_root else Path(".")).resolve() / ".env"
+            if not env_file.exists():
+                env_file = Path(".env")
+            master_config = MasterProjectConfig.load(self.config_path, env_file=env_file)
+            
+            self.project_root = Path(project_root).resolve() if project_root is not None else master_config.project_root
+            self.project_name = project_name or master_config.project_name
+            self.state_dir = Path(state_dir).resolve() if state_dir is not None else master_config.state_dir
+            self.watch_patterns = watch_patterns if watch_patterns is not None else master_config.watch_patterns
+            self.ignore_patterns = ignore_patterns if ignore_patterns is not None else master_config.ignore_patterns
+        else:
+            self.project_root = (
+                Path(project_root).resolve()
+                if project_root is not None
+                else self._project_root_for_config(self.config_path)
+            )
+            self.project_name = project_name or self.project_root.name
+            self.state_dir = (
+                Path(state_dir).resolve()
+                if state_dir is not None
+                else self.project_root / STATE_DIR_NAME
+            )
+            self.watch_patterns = watch_patterns
+            self.ignore_patterns = ignore_patterns
+
         self.config = self._load_config()
         self.provider_factory = provider_factory
         self.logger = logging.getLogger(f"{LOGGER_NAME}.{self.project_name}")
         self.trace_store = TraceStore(self.state_dir)
         self.tracer = Tracer(self.trace_store, enabled=True)
-        self.token_budget = TokenBudget(self.state_dir)
+
+        token_budgets_config = None
+        self.quality_gates_config = {}
+        circuit_breaker_threshold = None
+        circuit_breaker_timeout = None
+        alerts_config = None
+        usd_to_inr = 83.5
+
+        if master_config:
+            token_budgets_config = master_config.token_budgets
+            self.quality_gates_config = master_config.quality_gates
+            circuit_breaker_threshold = master_config.circuit_breaker_failure_threshold
+            circuit_breaker_timeout = float(master_config.circuit_breaker_recovery_timeout_seconds)
+            alerts_config = master_config.raw_config.get("alerts", {})
+            usd_to_inr = master_config.usd_to_inr
+        else:
+            try:
+                usd_to_inr = float(self.config.get("pricing", {}).get("usd_to_inr", 83.5))
+            except Exception:
+                pass
+
+        self.token_budget = TokenBudget(self.state_dir, budgets=token_budgets_config)
         custom_catalog = self.config.get("pricing", {}).get("catalog", None)
         self.cost_tracker = CostTracker(
             self.state_dir,
-            usd_to_inr=self._get_usd_to_inr(),
+            usd_to_inr=usd_to_inr,
             pricing_catalog=custom_catalog
         )
         self.cost_tracker.tracer = self.tracer
         self.circuit_breakers = {
-            "gemini": CircuitBreaker("gemini", state_dir=self.state_dir),
-            "openrouter": CircuitBreaker("openrouter", state_dir=self.state_dir),
-            "ollama": CircuitBreaker("ollama", state_dir=self.state_dir),
+            "gemini": CircuitBreaker("gemini", failure_threshold=circuit_breaker_threshold, recovery_timeout=circuit_breaker_timeout, state_dir=self.state_dir),
+            "openrouter": CircuitBreaker("openrouter", failure_threshold=circuit_breaker_threshold, recovery_timeout=circuit_breaker_timeout, state_dir=self.state_dir),
+            "ollama": CircuitBreaker("ollama", failure_threshold=circuit_breaker_threshold, recovery_timeout=circuit_breaker_timeout, state_dir=self.state_dir),
         }
         self.provider_health_monitor = ProviderHealthMonitor({})
         self.providers = self._initialize_providers()
@@ -260,14 +307,33 @@ class ProjectOS:
             self.evaluation_store,
             self.state_dir,
         )
+        from core.evaluation.quality_gate import DEFAULT_POLICIES, GatePolicy
+        policies = dict(DEFAULT_POLICIES)
+        if self.quality_gates_config:
+            for agent_name, gate in self.quality_gates_config.items():
+                default_policy = DEFAULT_POLICIES.get(agent_name)
+                min_score = gate.get("min_score", default_policy.min_combined_score if default_policy else 0.50)
+                req_llm = gate.get("require_llm_eval", default_policy.require_llm_evaluation if default_policy else False)
+                req_static = gate.get("require_static", default_policy.require_static_analysis if default_policy else False)
+                block_sec = gate.get("block_security_high", default_policy.block_on_security_high if default_policy else True)
+                block_reg = gate.get("block_regression", default_policy.block_on_regression if default_policy else False)
+                
+                policies[agent_name] = GatePolicy(
+                    agent_name=agent_name,
+                    min_combined_score=min_score,
+                    require_llm_evaluation=req_llm,
+                    require_static_analysis=req_static,
+                    block_on_security_high=block_sec,
+                    block_on_regression=block_reg
+                )
         self.quality_gate = QualityGate(
-            DEFAULT_POLICIES,
+            policies,
             self.quality_scorer,
             self.regression_detector,
             self.state_dir / GATE_LOG_NAME,
             tracer=self.tracer,
         )
-        self.alert_manager = AlertManager(self.state_dir)
+        self.alert_manager = AlertManager(self.state_dir, alerts_config=alerts_config)
         self.quality_evaluators = self._initialize_quality_evaluators()
         self.task_queue = TaskQueue(
             max_workers=TASK_QUEUE_WORKERS,
@@ -305,6 +371,14 @@ class ProjectOS:
         """Start trigger watching and event-loop processing."""
         if self._event_thread is not None and self._event_thread.is_alive():
             return
+
+        import signal
+        try:
+            signal.signal(signal.SIGINT, self._shutdown_handler)
+            signal.signal(signal.SIGTERM, self._shutdown_handler)
+        except ValueError:
+            pass
+
         self.stop_event.clear()
         if self.tracer and self.tracer.enabled:
             self.logger.info("Tracing enabled. Traces stored in .projectos_state/")
@@ -335,6 +409,32 @@ class ProjectOS:
             self.provider_health_monitor.get_status(),
         )
         self._log_final_status()
+
+    def _shutdown_handler(self, signum: int, frame: Any) -> None:
+        """Handle shutdown signals gracefully and exit."""
+        import sys
+        self.logger.info("Signal %d received, shutting down gracefully...", signum)
+        self.stop_event.set()
+        self.trigger_system.stop()
+        self.provider_health_monitor.stop()
+        
+        def shutdown_queue():
+            self.task_queue.shutdown(wait=True)
+        t = threading.Thread(target=shutdown_queue)
+        t.start()
+        t.join(timeout=10.0)
+        
+        self.alert_manager.stop()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        self.persistence_manager.snapshot_status(
+            self._agent_statuses(),
+            self.provider_health_monitor.get_status(),
+        )
+        self._log_final_status()
+        self.logger.info("ProjectOS shutdown complete")
+        sys.exit(0)
 
     def submit_event(self, event: AgentEvent) -> AgentResult:
         """Submit one event directly to Clone for orchestration."""
@@ -646,10 +746,19 @@ class ProjectOS:
 
     def _load_config(self) -> Mapping[str, Any]:
         """Load the ProjectOS model configuration."""
+        if self.config_path.name == "models.yaml":
+            sibling_projectos = self.config_path.parent / "projectos.yaml"
+            if sibling_projectos.exists():
+                self.logger.warning(
+                    "config/models.yaml is deprecated. Please use config/projectos.yaml instead."
+                )
         with self.config_path.open("r", encoding=ENCODING) as config_file:
             config = yaml.safe_load(config_file)
         if not isinstance(config, Mapping):
             raise ValueError("ProjectOS config must be a mapping.")
+        if "project" in config or config.get("version") == "0.3.0" or "token_budgets" in config:
+            from core.config_loader import adapt_to_legacy_config
+            config = adapt_to_legacy_config(config)
         return config
 
     def _get_usd_to_inr(self) -> float:

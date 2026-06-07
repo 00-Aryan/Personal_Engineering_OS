@@ -172,7 +172,28 @@ class TestAgent(BaseAgent):
             SYSTEM_PROMPT,
             MODEL_MAX_TOKENS,
         )
-        _write_atomically(test_path, self._normalized_tests(generated_tests))
+        generated_tests_normalized = self._normalized_tests(generated_tests)
+        _write_atomically(test_path, generated_tests_normalized)
+
+        blocked, flagged = self._scan_test_code(generated_tests_normalized)
+        if blocked:
+            warning_reason = "Test execution blocked: dangerous pattern detected"
+            self.logger.warning("%s: %s", warning_reason, blocked)
+            self._write_security_warning(source_path, event, blocked, flagged)
+            self._log_decision(event, DECISION_FAILURE, warning_reason)
+            return AgentResult(
+                success=True,
+                output={
+                    OUTPUT_KEY_TEST_FILE: str(test_path),
+                    OUTPUT_KEY_PASSED: 0,
+                    OUTPUT_KEY_FAILED: 0,
+                    "blocked": True,
+                    "blocked_reasons": blocked,
+                },
+                next_events=[],
+                escalate=True,
+                escalation_reason=warning_reason,
+            )
 
         completed_process = self._run_pytest(test_path)
         pytest_output = self._pytest_output(completed_process)
@@ -238,14 +259,23 @@ class TestAgent(BaseAgent):
         return generated_tests.strip() + NEWLINE
 
     def _run_pytest(self, test_path: Path) -> subprocess.CompletedProcess[str]:
-        """Run pytest for a generated test file."""
+        """Run pytest for a generated test file with a 30 second timeout."""
         command = [PYTEST_COMMAND, PYTEST_MODULE_FLAG, PYTEST_MODULE_NAME, str(test_path)]
-        return subprocess.run(
-            command,
-            cwd=self.project_root,
-            capture_output=SUBPROCESS_CAPTURE_OUTPUT,
-            text=SUBPROCESS_TEXT_MODE,
-        )
+        try:
+            return subprocess.run(
+                command,
+                cwd=self.project_root,
+                capture_output=SUBPROCESS_CAPTURE_OUTPUT,
+                text=SUBPROCESS_TEXT_MODE,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as e:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=1,
+                stdout="pytest execution timed out after 30 seconds",
+                stderr=str(e),
+            )
 
     def _pytest_output(self, completed_process: subprocess.CompletedProcess[str]) -> str:
         """Return combined pytest stdout and stderr output."""
@@ -296,6 +326,99 @@ class TestAgent(BaseAgent):
         )
         _append_atomically(self.project_root / DECISIONS_LOG_NAME, decision_line)
         self.log_decision(reasoning, outcome)
+
+    def _scan_test_code(self, code_str: str) -> tuple[list[str], list[str]]:
+        """Scan code string for dangerous patterns using AST."""
+        import ast
+        blocked = []
+        flagged = []
+        try:
+            tree = ast.parse(code_str)
+        except Exception:
+            return [], []
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for name in node.names:
+                    if name.name in ("os", "subprocess", "sys"):
+                        flagged.append(f"import {name.name}")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module in ("os", "subprocess", "sys"):
+                    flagged.append(f"from {node.module} import ...")
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute):
+                    if isinstance(node.func.value, ast.Name):
+                        module_name = node.func.value.id
+                        attr_name = node.func.attr
+                        if module_name == "os" and attr_name == "system":
+                            blocked.append("os.system")
+                        elif module_name == "subprocess" and attr_name == "run":
+                            blocked.append("subprocess.run")
+                elif isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                    if func_name in ("eval", "exec"):
+                        blocked.append(func_name)
+                    elif func_name == "open":
+                        mode_val = "r"
+                        for kw in node.keywords:
+                            if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                                mode_val = str(kw.value.value)
+                        if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                            mode_val = str(node.args[1].value)
+                        
+                        if any(char in mode_val for char in ("w", "a", "x", "+")):
+                            is_outside_tests = True
+                            if len(node.args) >= 1:
+                                path_node = node.args[0]
+                                if isinstance(path_node, ast.Constant) and isinstance(path_node.value, str):
+                                    path_str = path_node.value
+                                    norm_path = os.path.normpath(path_str)
+                                    if norm_path.startswith("tests") or "tests/" in norm_path or "tests\\" in norm_path or norm_path.startswith("./tests"):
+                                        is_outside_tests = False
+                            if is_outside_tests:
+                                blocked.append("open() in write mode outside tests/ directory")
+        return blocked, flagged
+
+    def _write_security_warning(
+        self,
+        source_path: Path,
+        event: AgentEvent,
+        blocked: list[str],
+        flagged: list[str],
+    ) -> None:
+        """Write a security warning warning to the review report."""
+        review_report_val = event.payload.get("review_report")
+        report_path = None
+        if review_report_val:
+            report_path = self._resolve_path(review_report_val)
+        else:
+            reviews_dir = self.project_root / "reviews"
+            if reviews_dir.exists():
+                matching_reports = sorted(
+                    reviews_dir.glob(f"{source_path.name}*_review.md"),
+                    key=os.path.getmtime,
+                )
+                if matching_reports:
+                    report_path = matching_reports[-1]
+        
+        if not report_path:
+            reviews_dir = self.project_root / "reviews"
+            reviews_dir.mkdir(parents=True, exist_ok=True)
+            report_path = reviews_dir / f"{source_path.name}_review.md"
+
+        warning_msg = (
+            f"\n\n## WARNING: Test Execution Blocked\n"
+            f"Dangerous pattern detected in generated tests.\n"
+            f"- **Blocked patterns**: {', '.join(blocked)}\n"
+        )
+        if flagged:
+            warning_msg += f"- **Flagged patterns**: {', '.join(flagged)}\n"
+        warning_msg += f"- **Timestamp**: {_utc_timestamp()}\n"
+
+        if report_path.exists():
+            _append_atomically(report_path, warning_msg)
+        else:
+            _write_atomically(report_path, warning_msg)
 
 
 __all__ = ["TestAgent"]
