@@ -356,7 +356,7 @@ class TestAgent(BaseAgent):
                             blocked.append("subprocess.run")
                 elif isinstance(node.func, ast.Name):
                     func_name = node.func.id
-                    if func_name in ("eval", "exec"):
+                    if func_name in ("eval", "exec", "system", "run"):
                         blocked.append(func_name)
                     elif func_name == "open":
                         mode_val = "r"

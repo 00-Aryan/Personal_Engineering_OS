@@ -124,3 +124,35 @@ def test_missing_config_file_raises_clear_error():
     with pytest.raises(FileNotFoundError) as exc_info:
         ProjectConfig.load(non_existent)
     assert "Config file not found" in str(exc_info.value)
+
+
+def test_circuit_breaker_config_properties():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config_file = tmp_path / "projectos.yaml"
+        custom_cb = {
+            "version": "0.3.0",
+            "project": {"name": "test", "root": "."},
+            "providers": {"default": "mock-prov", "mock-prov": {"type": "gemini", "model": "m", "api_key_env": "GEMINI_API_KEY"}},
+            "agents": {"clone": "mock-prov", "planning": "mock-prov", "code_writing": "mock-prov", "code_review": "mock-prov", "architecture": "mock-prov", "test": "mock-prov", "docs": "mock-prov"},
+            "circuit_breakers": {
+                "failure_threshold": 8,
+                "recovery_timeout_seconds": 90,
+                "minimum_open_duration": 45.0,
+                "consecutive_success_threshold": 4
+            }
+        }
+        config_file.write_text(yaml.safe_dump(custom_cb), encoding="utf-8")
+        os.environ["GEMINI_API_KEY"] = "dummy"
+        try:
+            config = ProjectConfig.load(config_file)
+            assert config.circuit_breaker_failure_threshold == 8
+            assert config.circuit_breaker_recovery_timeout_seconds == 90
+            assert config.circuit_breaker_minimum_open_duration == 45.0
+            assert config.circuit_breaker_consecutive_success_threshold == 4
+            
+            errors = config.validate()
+            assert len(errors) == 0
+        finally:
+            del os.environ["GEMINI_API_KEY"]
+

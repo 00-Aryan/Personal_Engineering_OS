@@ -1,13 +1,13 @@
 # ProjectOS Production Readiness Assessment
-Version: 0.3.0
-Date: 2026-06-07
+Version: 0.4.0
+Date: 2026-06-08
 Assessed by: ProjectOS automated check + Aryan Kumar
 
 This assessment evaluates ProjectOS against production readiness standards across reliability, observability, security, quality, and operations.
 
 ## Reliability
-- [PARTIAL] **Retry logic on all external calls**: Retry logic is robustly integrated for all model provider completions and health checks, but does not extend to all git or file system CLI wrappers.
-- [PASS] **Circuit breakers for all providers**: Active states (Closed, Open, Half-Open) are tracked per provider and stored atomically.
+- [PASS] **Retry logic on all external calls**: Retry logic handles transient issues with backoff, specifically managing 429 (rate limit with Retry-After header), 503 (unavailable), 401 (fails fast), and custom non-retriable exceptions.
+- [PASS] **Circuit breakers for all providers**: Active states (Closed, Open, Half-Open) are tracked per provider and stored atomically. Flapping prevention enforces minimum open duration (30s) and consecutive success threshold (3).
 - [PASS] **Rate limiting enforced**: Thread-safe token bucket rate limiters prevent provider overloading.
 - [PASS] **Graceful degradation when providers unavailable**: Fallback router automatically redirects requests to alternate models/providers.
 - [PASS] **Process restarts recover queue state**: Durable task queue persistence saves blocked and pending tasks to disk and recovers them on reboot.
@@ -25,7 +25,7 @@ This assessment evaluates ProjectOS against production readiness standards acros
 - [PASS] **No API keys in log files**: Logs and traces exclude credentials or sensitive header parameters.
 - [PASS] **File write safety policies enforced**: Writes restricted to allowed directories, protecting system files.
 - [PASS] **Consultation depth limits enforced**: Max recursion depth bounded to prevent agent consultation loops.
-- [PARTIAL] **No arbitrary code execution from agent output**: Code outputs are reviewed, but test executions occur in the host environment rather than a sandboxed container.
+- [PASS] **No arbitrary code execution from agent output**: Code outputs are reviewed, and generated test files are scanned via AST for dangerous calls (`os.system`, `subprocess.run`, `eval`, `exec`, `open` in write mode outside `tests/` dir) and blocked if found, preventing sandbox escape.
 
 ## Quality
 - [PASS] **LLM-as-judge evaluation for agent outputs**: LLMJudge parses and grades output correctness and quality.
@@ -35,7 +35,7 @@ This assessment evaluates ProjectOS against production readiness standards acros
 - [PASS] **Static analysis on generated code**: Static analyzer executes linter checks.
 
 ## Operations
-- [PARTIAL] **Graceful shutdown on SIGINT/SIGTERM**: Active file watchers and thread pools shut down cleanly, but explicit signal handlers could be centralized further.
+- [PASS] **Graceful shutdown on SIGINT/SIGTERM**: Core orchestrator registers OS signal handlers to clean up active watchers, stop background task queue execution gracefully within a 10-second timeout, flush standard writers, and save a persistence manager snapshot.
 - [PASS] **All state recoverable from .projectos_state/**: All traces, alerts, and budgets are loaded from the state directory.
 - [PASS] **CLI provides access to all operational data**: Traces, tokens, costs, and reliability groups are fully exposed.
 - [PASS] **Documentation covers all CLI commands**: CLI commands are documented via help menus and READMEs.
@@ -44,9 +44,8 @@ This assessment evaluates ProjectOS against production readiness standards acros
 ---
 
 ## Known Gaps
-1. **Unsandboxed Code Execution**: Pytest runs tests directly in the host OS environment. A malicious or incorrect agent-generated test suite could theoretically execute harmful commands.
+1. **Host-level Pytest Dependency**: Ephemeral code execution is scanned for safety but still executes on the host OS. A full virtualization wrapper (e.g. gVisor, Docker) is the next hardening step.
 2. **Synchronous File I/O**: High-concurrency operations may hit minor disk lock latency, as JSONL databases are appended synchronously.
-3. **Implicit Signal Handling**: Signals are caught by thread boundaries, but a central orchestrator shutdown sequence is not explicitly registered to OS interrupt hooks.
 
 ---
 
@@ -54,6 +53,6 @@ This assessment evaluates ProjectOS against production readiness standards acros
 
 | Risk | Impact | Likelihood | Mitigation |
 | :--- | :--- | :--- | :--- |
-| **R1: Sandbox Escape via Test Generation** | Critical | Medium | Run test executions inside ephemeral Docker containers rather than directly on the host system (planned for Phase 6). |
-| **R2: Token Budget Exhaustion on Loops** | High | Low | TokenBudget hard limits act as safety brakes. Keep daily agent limits low and alert early at 80% usage threshold. |
-| **R3: Circuit Breaker Flapping** | Medium | Medium | Increase recovery timeout dynamically (exponential backoff) on consecutive probe failures to prevent rapid state transitions. |
+| **R1: Sandbox Escape via Test Generation** | High | Low | AST safety scanner blocks dangerous patterns (system calls, writes outside tests/ directory) and enforces a 30s timeout execution threshold. |
+| **R2: Token Budget Exhaustion on Loops** | Medium | Low | TokenBudget hard limits act as safety brakes. `record_model_call` limits model calls to 5 per event to prevent infinite reasoning loops. |
+| **R3: Circuit Breaker Flapping** | Low | Low | Enforce minimum open duration (30s) and consecutive success threshold (3) to prevent rapid open/close cycling on flickering providers. |

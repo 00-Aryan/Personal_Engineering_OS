@@ -163,6 +163,8 @@ class ProjectConfig:
         cb = raw_config.get("circuit_breakers", {})
         self.circuit_breaker_failure_threshold = int(cb.get("failure_threshold", 5))
         self.circuit_breaker_recovery_timeout_seconds = int(cb.get("recovery_timeout_seconds", 60))
+        self.circuit_breaker_minimum_open_duration = float(cb.get("minimum_open_duration", 30.0))
+        self.circuit_breaker_consecutive_success_threshold = int(cb.get("consecutive_success_threshold", 3))
 
         # Alerts properties
         al = raw_config.get("alerts", {})
@@ -398,6 +400,14 @@ costs:
                 rt = cb["recovery_timeout_seconds"]
                 if not isinstance(rt, int) or rt <= 0:
                     errors.append("Circuit breaker 'recovery_timeout_seconds' must be a positive integer")
+            if "minimum_open_duration" in cb:
+                mod = cb["minimum_open_duration"]
+                if not isinstance(mod, (int, float)) or mod < 0:
+                    errors.append("Circuit breaker 'minimum_open_duration' must be a non-negative number")
+            if "consecutive_success_threshold" in cb:
+                cst = cb["consecutive_success_threshold"]
+                if not isinstance(cst, int) or cst <= 0:
+                    errors.append("Circuit breaker 'consecutive_success_threshold' must be a positive integer")
 
         # 8. Alerts validation
         al = self.raw_config.get("alerts", {})

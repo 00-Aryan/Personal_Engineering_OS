@@ -221,6 +221,8 @@ class ProjectOS:
         self.quality_gates_config = {}
         circuit_breaker_threshold = None
         circuit_breaker_timeout = None
+        circuit_breaker_min_open = None
+        circuit_breaker_success_threshold = None
         alerts_config = None
         usd_to_inr = 83.5
 
@@ -229,6 +231,8 @@ class ProjectOS:
             self.quality_gates_config = master_config.quality_gates
             circuit_breaker_threshold = master_config.circuit_breaker_failure_threshold
             circuit_breaker_timeout = float(master_config.circuit_breaker_recovery_timeout_seconds)
+            circuit_breaker_min_open = float(master_config.circuit_breaker_minimum_open_duration)
+            circuit_breaker_success_threshold = int(master_config.circuit_breaker_consecutive_success_threshold)
             alerts_config = master_config.raw_config.get("alerts", {})
             usd_to_inr = master_config.usd_to_inr
         else:
@@ -246,9 +250,30 @@ class ProjectOS:
         )
         self.cost_tracker.tracer = self.tracer
         self.circuit_breakers = {
-            "gemini": CircuitBreaker("gemini", failure_threshold=circuit_breaker_threshold, recovery_timeout=circuit_breaker_timeout, state_dir=self.state_dir),
-            "openrouter": CircuitBreaker("openrouter", failure_threshold=circuit_breaker_threshold, recovery_timeout=circuit_breaker_timeout, state_dir=self.state_dir),
-            "ollama": CircuitBreaker("ollama", failure_threshold=circuit_breaker_threshold, recovery_timeout=circuit_breaker_timeout, state_dir=self.state_dir),
+            "gemini": CircuitBreaker(
+                "gemini",
+                failure_threshold=circuit_breaker_threshold,
+                recovery_timeout=circuit_breaker_timeout,
+                state_dir=self.state_dir,
+                minimum_open_duration=circuit_breaker_min_open,
+                consecutive_success_threshold=circuit_breaker_success_threshold,
+            ),
+            "openrouter": CircuitBreaker(
+                "openrouter",
+                failure_threshold=circuit_breaker_threshold,
+                recovery_timeout=circuit_breaker_timeout,
+                state_dir=self.state_dir,
+                minimum_open_duration=circuit_breaker_min_open,
+                consecutive_success_threshold=circuit_breaker_success_threshold,
+            ),
+            "ollama": CircuitBreaker(
+                "ollama",
+                failure_threshold=circuit_breaker_threshold,
+                recovery_timeout=circuit_breaker_timeout,
+                state_dir=self.state_dir,
+                minimum_open_duration=circuit_breaker_min_open,
+                consecutive_success_threshold=circuit_breaker_success_threshold,
+            ),
         }
         self.provider_health_monitor = ProviderHealthMonitor({})
         self.providers = self._initialize_providers()

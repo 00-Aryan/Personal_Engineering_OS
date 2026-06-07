@@ -192,6 +192,23 @@ class TestAgentTestCase(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertFalse(result.escalate)
 
+    @patch("agents.test_agent.subprocess.run")
+    def test_blocked_dangerous_pattern_from_import(self, run_mock: Any) -> None:
+        """Verify that importing system/run directly and calling them is blocked."""
+        self.model_provider.complete.return_value = (
+            "from subprocess import run\n"
+            "def test_dangerous() -> None:\n"
+            "    run(['rm', '-rf', '/'])\n"
+        )
+        result = self.agent.handle(self._code_event())
+        
+        run_mock.assert_not_called()
+        self.assertTrue(result.success)
+        self.assertTrue(result.escalate)
+        self.assertEqual(result.escalation_reason, "Test execution blocked: dangerous pattern detected")
+        self.assertTrue(result.output.get("blocked"))
+
 
 if __name__ == "__main__":
     unittest.main()
+
