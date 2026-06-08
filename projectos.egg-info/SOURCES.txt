@@ -81,6 +81,7 @@ scripts/profile_session.py
 scripts/provider_setup.py
 scripts/quality_benchmark.py
 scripts/quality_delta.py
+scripts/real_api_smoke.py
 scripts/setup_providers.py
 tests/test_architecture_agent.py
 tests/test_base_agent.py
@@ -100,6 +101,7 @@ tests/test_fallback_router.py
 tests/test_git_manager.py
 tests/test_install.py
 tests/test_integration.py
+tests/test_launch_assets.py
 tests/test_mcp_server.py
 tests/test_model_provider.py
 tests/test_ollama_provider.py
@@ -112,6 +114,8 @@ tests/test_projectos.py
 tests/test_provider_health.py
 tests/test_provider_setup.py
 tests/test_quality_benchmark.py
+tests/test_real_api_smoke.py
+tests/test_repository_hygiene.py
 tests/test_retry.py
 tests/test_safety.py
 tests/test_task_queue.py
