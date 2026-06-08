@@ -7,3 +7,4 @@ __pycache__/
 .projectos_state/
 .codex/settings.local.json
 dist/
+.projectos_state/real_api_smoke_results.json

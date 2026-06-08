@@ -1,0 +1,25 @@
+# Apply these settings at:
+# github.com/00-Aryan/Personal_Engineering_OS/settings
+
+name: Personal_Engineering_OS
+description: "🤖 Autonomous multi-agent system that engineers your software projects while you study. 7 specialized AI agents, quality gates, and real-time observability."
+
+topics:
+  - ai-agents
+  - llm
+  - python
+  - developer-tools
+  - autonomous-agents
+  - gemini
+  - openrouter
+  - multi-agent
+  - code-review
+  - software-engineering
+
+website: ""  # Add later if landing page created
+
+# Features to enable:
+issues: true
+projects: false
+wiki: false
+discussions: false  # Enable after first users
