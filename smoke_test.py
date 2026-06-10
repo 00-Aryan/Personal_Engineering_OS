@@ -46,7 +46,9 @@ class SmokeModelProvider:
         self,
         prompt: str,
         system_prompt: str,
-        max_tokens: int,
+        max_tokens: int = 1000,
+        *args: Any,
+        **kwargs: Any,
     ) -> str:
         """Return an empty deterministic completion."""
         return ""

@@ -124,3 +124,20 @@ class FakeObserver:
     def join(self) -> None:
         """Record that the observer thread was joined."""
         self.joined = True
+
+
+def test_trigger_system_paused_ignores_change(tmp_path: Path) -> None:
+    """Verify that when pause flag exists, trigger system ignores file changes."""
+    state_dir = tmp_path / ".projectos_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    paused_file = state_dir / "paused"
+    paused_file.touch()
+
+    dispatcher: queue.Queue[AgentEvent] = queue.Queue()
+    system = TriggerSystem(tmp_path, dispatcher)
+    changed_file = tmp_path / PYTHON_FILE_NAME
+    changed_file.write_text(SOURCE_CODE, encoding=TEST_ENCODING)
+
+    system.handler.on_modified(_modified_event(changed_file))
+
+    assert dispatcher.empty()

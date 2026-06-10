@@ -8,9 +8,14 @@ description: "Run the next PENDING task in ProjectOS tasks/README.md. Use when u
 1. Read tasks/README.md — find the first PENDING task
 2. Read that TASK_XX.md completely
 3. Read AGENTS.md for all architectural rules
-4. Read all existing code in core/ and agents/ before writing anything
+4. Read ONLY the files explicitly listed in the task's Pre-conditions section
 5. Execute the task exactly as specified
-6. Run full test suite: PYTHONDONTWRITEBYTECODE=1 uv run pytest
-7. Write TASK_XX_RESULT.md with: files created, test count, decisions made
+6. Run full test suite: UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync pytest -q --timeout=30
+7. Write result file to tasks/TASK_XX_RESULT.md — NEVER to the project root
 8. Update tasks/README.md — mark task DONE
 9. Stop and report summary
+
+## CRITICAL: Result File Location
+- CORRECT: tasks/TASK_55b_RESULT.md
+- WRONG:   TASK_55b_RESULT.md  (project root)
+- If you wrote to root by mistake: mv TASK_XX_RESULT.md tasks/

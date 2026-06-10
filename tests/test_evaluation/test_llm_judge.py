@@ -40,6 +40,8 @@ class MockModelProvider(ModelProvider):
         max_tokens: int,
         agent_name: str | None = None,
         token_budget: Any = None,
+        *args,
+        **kwargs,
     ) -> str:
         """Capture prompt inputs and return the configured response."""
         self.prompts.append(prompt)

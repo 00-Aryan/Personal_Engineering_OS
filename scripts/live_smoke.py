@@ -24,7 +24,7 @@ from scripts.provider_setup import (
 )
 
 
-SMOKE_PROMPT = "Reply with exactly: PROJECTOS_LIVE_TEST_OK"
+SMOKE_PROMPT = "Reply with exactly: LIVE_OK"
 SMOKE_SYSTEM_PROMPT = "You are a smoke test. Keep the response short."
 MAX_TOKENS = 32
 
@@ -72,9 +72,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     for provider_name in provider_names:
         try:
             output, latency_ms, tokens_used = _run_provider_smoke(provider_name, config, args.config, args.status_file.parent)
-            if "PROJECTOS_LIVE_TEST_OK" not in output:
+            if "LIVE_OK" not in output:
                 failures.append(f"{provider_name} returned {output}")
-                print(f"{provider_name}: live smoke failed - Expected 'PROJECTOS_LIVE_TEST_OK', got '{output}'")
+                print(f"{provider_name}: live smoke failed - Expected 'LIVE_OK', got '{output}'")
             else:
                 results[provider_name] = {
                     "latency_ms": latency_ms,

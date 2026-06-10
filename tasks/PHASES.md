@@ -15,10 +15,27 @@ Phase 8:    Open Source Launch            COMPLETE ✅ (TASK_50-53)
 ## TOTAL
 53 tasks. 8 phases. v0.6.0 shipped.
 
-## IF CONTINUED: Phase 9 Options
+## Phase 9 — Real-World Intelligence + Daily UX    IN PROGRESS 🔄 (NEXT)
+
+Goal: Make every agent project-aware, protect against token waste,
+enable Telegram-based mobile control, and support multi-project rotation.
+
+Tasks:
+  TASK_54: Project Context Extraction + Agent Prompt Foundation  PENDING
+  TASK_55: Pre-Write Validator + Token Protection                PENDING
+  TASK_56: Task Decomposer                                       PENDING
+  TASK_57: Telegram Bot — Notifications + Status                 PENDING
+  TASK_58: Telegram Bot — Inbound Commands                       PENDING
+  TASK_59: Project Intake Agent + Phase Manager                  PENDING
+  TASK_60: Multi-Project Rotation + Daily UX                     PENDING
+  TASK_61: Ollama Local Fallback + Model Parameter Tuning        PENDING
+  TASK_62: README Overhaul + KNOWN_LIMITATIONS.md + FUTURE_SCOPE.md  PENDING
+
+## IF CONTINUED: Phase 9 Options (original — superseded)
 A. SaaS/product — only if real users want it
 B. Containerized sandbox (Docker isolation for test execution)
 C. Multi-project daemon (watch multiple repos simultaneously)
 D. Web dashboard (replace terminal UI with browser interface)
 
-Decision: make after observing real user feedback for 30 days.
+Decision: Phase 9 chosen = C (multi-project) + D-lite (Telegram UX)
+         based on Aryan's real usage needs.

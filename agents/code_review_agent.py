@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, List, Mapping, Optional, Sequence, TYPE_CHECKING
 
 from core.base_agent import BaseAgent
+from core.project_context import ProjectContextLoader
 from core.events import AgentEvent, AgentResult, EventType
 from core.git_manager import GitManager
 from core.model_provider import ModelProvider
@@ -42,17 +43,7 @@ REVIEWS_DIR_NAME = "reviews"
 GITKEEP_FILE_NAME = ".gitkeep"
 MODEL_MAX_TOKENS = 8192
 
-SYSTEM_PROMPT = (
-    "You are a principal engineer conducting code review.\n"
-    "You are strict, thorough, and direct. No praise. Only issues.\n"
-    "For every issue found, output JSON with:\n"
-    "severity (CRITICAL/HIGH/MEDIUM/LOW),\n"
-    "category (security/logic/performance/style/test_coverage/docs),\n"
-    "line_number (or null),\n"
-    "description,\n"
-    "suggested_fix\n"
-    "Output a JSON array of issues. If no issues, output empty array []."
-)
+# Global SYSTEM_PROMPT removed (defined as class attribute instead)
 CONTEXT_SYSTEM_PROMPT_TEMPLATE = (
     "{system_prompt}\n\n"
     "You have access to relevant codebase context:\n{context}"
@@ -221,6 +212,25 @@ def _append_atomically(path: Path, content: str) -> None:
 class CodeReviewAgent(BaseAgent):
     """Agent that reviews code and emits REVIEW_DONE events."""
 
+    SYSTEM_PROMPT = """You are a principal engineer doing code review.
+You are strict, specific, and direct.
+
+ALWAYS:
+- Reference exact line numbers for every issue
+- Provide a specific fix for every issue you raise
+- Categorize severity: CRITICAL / HIGH / MEDIUM / LOW
+- Review specifically for the project's tech stack
+
+NEVER:
+- Raise issues without suggested fixes
+- Flag style issues as CRITICAL or HIGH
+- Praise — only issues
+- Review code outside the specified file
+
+Output: JSON array only. Empty array if no issues.
+[{"severity": "HIGH", "line": 42, "issue": "...", "fix": "..."}]
+{project_context}"""
+
     def __init__(
         self,
         model_provider: ModelProvider,
@@ -231,6 +241,7 @@ class CodeReviewAgent(BaseAgent):
         memory_manager: Optional["MemoryManager"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
         tracer: Optional[Tracer] = None,
+        context_loader: Optional[ProjectContextLoader] = None,
     ) -> None:
         """Initialize CodeReviewAgent with model access and review paths."""
         super().__init__(
@@ -241,11 +252,17 @@ class CodeReviewAgent(BaseAgent):
             context_retriever=context_retriever,
             memory_manager=memory_manager,
             collaboration_broker=collaboration_broker,
+            context_loader=context_loader,
         )
         self.project_root = Path(project_root)
         self.git_manager = git_manager
         self.tracer = tracer
         self._ensure_reviews_dir()
+
+    @property
+    def token_budget(self) -> Optional[Any]:
+        """Get the token budget manager from model provider."""
+        return getattr(self.model_provider, "token_budget", None)
 
     def handle(self, event: AgentEvent) -> AgentResult:
         """Review a changed or written code file."""
@@ -277,17 +294,44 @@ class CodeReviewAgent(BaseAgent):
 
             code = file_path.read_text(encoding=ENCODING)
             task_id = self._task_id(event.payload)
-            memories = self.recall_relevant(query=f"review {file_path}", k=3)
-            context = self.get_context(
-                task_description=self._task_description(event.payload),
-                file_path=str(file_path),
-            )
-            prompt = self._build_prompt(file_path, task_id, code)
-            model_output = self.model_provider.complete(
-                prompt,
-                self._system_prompt(context, memories),
-                MODEL_MAX_TOKENS,
-            )
+
+            params = self.get_model_params()
+            original_max_context_tokens = None
+            if self.token_budget and self.token_budget.conservative_mode_active(self.name):
+                self.logger.info(f"Conservative mode active for {self.name}")
+                if self.context_retriever:
+                    original_max_context_tokens = self.context_retriever.max_context_tokens
+                    self.context_retriever.max_context_tokens = original_max_context_tokens // 2
+
+            try:
+                memories = self.recall_relevant(query=f"review {file_path}", k=3)
+                context = self.get_context(
+                    task_description=self._task_description(event.payload),
+                    file_path=str(file_path),
+                )
+                prompt = self._build_prompt(file_path, task_id, code)
+                system_prompt = self.build_system_prompt(self.SYSTEM_PROMPT)
+                if context:
+                    system_prompt = CONTEXT_SYSTEM_PROMPT_TEMPLATE.format(
+                        system_prompt=system_prompt,
+                        context=context,
+                    )
+                if memories:
+                    system_prompt = MEMORY_SYSTEM_PROMPT_TEMPLATE.format(
+                        system_prompt=system_prompt,
+                        memories=memories,
+                    )
+                model_output = self.model_provider.complete(
+                    prompt,
+                    system_prompt,
+                    params["max_tokens"],
+                    temperature=params["temperature"],
+                    top_p=params["top_p"],
+                    agent_name=self.name,
+                )
+            finally:
+                if original_max_context_tokens is not None and self.context_retriever:
+                    self.context_retriever.max_context_tokens = original_max_context_tokens
             try:
                 issues = self.parse_issues(model_output)
             except ValueError as error:
@@ -413,20 +457,6 @@ class CodeReviewAgent(BaseAgent):
         task_id = self._task_id(payload)
         return task_id or EMPTY_TEXT
 
-    def _system_prompt(self, context: Optional[str], memories: str = EMPTY_TEXT) -> str:
-        """Return the review system prompt with optional codebase context and memory."""
-        system_prompt = SYSTEM_PROMPT
-        if context:
-            system_prompt = CONTEXT_SYSTEM_PROMPT_TEMPLATE.format(
-                system_prompt=system_prompt,
-                context=context,
-            )
-        if memories:
-            system_prompt = MEMORY_SYSTEM_PROMPT_TEMPLATE.format(
-                system_prompt=system_prompt,
-                memories=memories,
-            )
-        return system_prompt
 
     def _build_prompt(
         self,

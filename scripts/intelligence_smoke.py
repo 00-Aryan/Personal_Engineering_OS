@@ -62,7 +62,14 @@ class SmokeProvider(ModelProvider):
         self.agent_name = agent_name
         self.calls: list[tuple[str, str, int]] = []
 
-    def complete(self, prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def complete(
+        self,
+        prompt: str,
+        system_prompt: str,
+        max_tokens: int = 1000,
+        *args: Any,
+        **kwargs: Any,
+    ) -> str:
         """Return deterministic model output for the configured agent."""
         self.calls.append((prompt, system_prompt, max_tokens))
         if self.agent_name == MEMORY_AGENT_PLANNING:

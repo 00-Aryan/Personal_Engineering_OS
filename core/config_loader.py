@@ -122,6 +122,8 @@ def adapt_to_legacy_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         "agents": legacy_agents,
         "fallback_chain": legacy_fallbacks,
         "pricing": legacy_pricing,
+        "model_parameters": raw_config.get("model_parameters", {}),
+        "ollama": raw_config.get("ollama", {}),
     }
 
 
@@ -177,6 +179,15 @@ class ProjectConfig:
         # Cost tracking properties
         costs = raw_config.get("costs", {})
         self.usd_to_inr = float(costs.get("usd_to_inr", 83.5))
+
+        # Validation properties
+        validation = raw_config.get("validation", {})
+        self.validation_max_new_file_lines = int(validation.get("max_new_file_lines", 150))
+        self.validation_max_size_ratio = float(validation.get("max_size_ratio", 2.5))
+
+        # Model parameter and Ollama configurations
+        self.model_parameters = raw_config.get("model_parameters", {})
+        self.ollama = raw_config.get("ollama", {})
 
     @classmethod
     def load(cls, config_path: Path = Path("config/projectos.yaml"),
@@ -292,6 +303,11 @@ alerts:
 # --- Cost Tracking ---
 costs:
   usd_to_inr: 83.5
+
+# --- Validation ---
+validation:
+  max_new_file_lines: 150
+  max_size_ratio: 2.5
 """
         output_path.write_text(default_yaml, encoding="utf-8")
 
@@ -423,5 +439,17 @@ costs:
                 u2i = costs["usd_to_inr"]
                 if not isinstance(u2i, (int, float)) or u2i <= 0:
                     errors.append("Cost setting 'usd_to_inr' must be a positive number")
+
+        # 10. Validation settings validation
+        val_sec = self.raw_config.get("validation", {})
+        if val_sec:
+            if "max_new_file_lines" in val_sec:
+                mnfl = val_sec["max_new_file_lines"]
+                if not isinstance(mnfl, int) or mnfl <= 0:
+                    errors.append("Validation 'max_new_file_lines' must be a positive integer")
+            if "max_size_ratio" in val_sec:
+                msr = val_sec["max_size_ratio"]
+                if not isinstance(msr, (int, float)) or msr <= 0:
+                    errors.append("Validation 'max_size_ratio' must be a positive number")
 
         return errors

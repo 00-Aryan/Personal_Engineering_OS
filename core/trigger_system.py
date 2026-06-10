@@ -85,6 +85,7 @@ class FileChangeHandler(FileSystemEventHandler):
         watch_patterns: Optional[Iterable[str]] = None,
         ignore_patterns: Optional[Iterable[str]] = None,
         code_indexer: Optional[Any] = None,
+        trigger_system: Optional[TriggerSystem] = None,
     ) -> None:
         """Initialize the handler with a queue dispatcher."""
         super().__init__()
@@ -92,6 +93,35 @@ class FileChangeHandler(FileSystemEventHandler):
         self.watch_patterns = list(watch_patterns or DEFAULT_WATCH_PATTERNS)
         self.ignore_patterns = list(ignore_patterns or DEFAULT_IGNORE_PATTERNS)
         self.code_indexer = code_indexer
+        self.trigger_system = trigger_system
+
+    def on_created(self, event: Any) -> None:
+        """Emit NEW_PROJECT for new project context/description files."""
+        if bool(getattr(event, "is_directory", False)):
+            return
+
+        src_path = getattr(event, "src_path", EMPTY_TEXT)
+        if not isinstance(src_path, str) or not src_path:
+            return
+
+        changed_path = Path(src_path)
+        if changed_path.name in ["project_description.md", "project_context.md"]:
+            agent_event = AgentEvent(
+                event_type=EventType.NEW_PROJECT,
+                source_agent=SOURCE_AGENT,
+                payload={"context_file_path": str(changed_path)},
+            )
+            if self.trigger_system is not None:
+                self.trigger_system._dispatch(agent_event)
+            else:
+                paused_file = Path(".projectos_state/paused")
+                if paused_file.exists():
+                    logger.info("System paused — ignoring trigger")
+                    return
+                try:
+                    self.event_dispatcher.put_nowait(agent_event)
+                except queue.Full:
+                    return
 
     def on_modified(self, event: Any) -> None:
         """Emit CODE_CHANGED for modified Python files without blocking."""
@@ -116,10 +146,19 @@ class FileChangeHandler(FileSystemEventHandler):
                 PAYLOAD_KEY_MODIFIED_AT: _utc_timestamp(),
             },
         )
-        try:
-            self.event_dispatcher.put_nowait(agent_event)
-        except queue.Full:
-            return
+        if self.trigger_system is not None:
+            dispatched = self.trigger_system._dispatch(agent_event)
+            if not dispatched:
+                return
+        else:
+            paused_file = Path(".projectos_state/paused")
+            if paused_file.exists():
+                logger.info("System paused — ignoring trigger")
+                return
+            try:
+                self.event_dispatcher.put_nowait(agent_event)
+            except queue.Full:
+                return
         self._update_index_async(changed_path)
 
     def _should_ignore(self, changed_path: Path) -> bool:
@@ -185,9 +224,22 @@ class TriggerSystem:
             watch_patterns=watch_patterns,
             ignore_patterns=ignore_patterns,
             code_indexer=code_indexer,
+            trigger_system=self,
         )
         self.observer = Observer()
         self._running = False
+
+    def _dispatch(self, event: AgentEvent) -> bool:
+        """Dispatch event if not paused. Returns True if dispatched."""
+        paused_file = self.watch_dir / ".projectos_state" / "paused"
+        if paused_file.exists():
+            logger.info("System paused — ignoring trigger")
+            return False
+        try:
+            self.event_dispatcher.put_nowait(event)
+            return True
+        except queue.Full:
+            return False
 
     def start(self) -> None:
         """Start the background file watcher thread."""

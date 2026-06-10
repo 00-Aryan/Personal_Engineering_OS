@@ -114,6 +114,8 @@ class DogfoodMockModelProvider(ModelProvider):
         token_budget: Optional[Any] = None,
         rate_limiter: Optional[Any] = None,
         circuit_breaker: Optional[Any] = None,
+        *args,
+        **kwargs,
     ) -> str:
         """Return mocked agent completion response with MOCK OUTPUT labels."""
         if self.agent_name == "planning":

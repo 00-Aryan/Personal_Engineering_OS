@@ -62,3 +62,10 @@ uv run --no-sync python scripts/intelligence_smoke.py
 - No single test may take > 10 seconds
 - Tests that call scripts/ must use subprocess timeout=30
 - Never call ProjectOS.start() or run_for_duration() in tests
+
+## Result File Location (CRITICAL — Never Violate)
+- ALL TASK_XX_RESULT.md files MUST be written to tasks/TASK_XX_RESULT.md
+- NEVER write result files to the project root directory
+- Correct: tasks/TASK_55b_RESULT.md
+- Wrong:   TASK_55b_RESULT.md (root)
+- If you wrote to root by mistake: mv TASK_XX_RESULT.md tasks/

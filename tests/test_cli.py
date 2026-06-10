@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -712,6 +713,82 @@ class CliTestCase(unittest.TestCase):
             "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
             encoding=TEST_ENCODING,
         )
+
+
+    def test_context_show_no_file(self) -> None:
+        """Verify context show command prints message when no context file exists."""
+        with patch.object(Path, "cwd", return_value=self.project_root):
+            result = self.runner.invoke(
+                cli,
+                ["context", "show"],
+                obj={"project_root": self.project_root},
+            )
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("No project context found.", result.output)
+
+    def test_context_show_parse_error(self) -> None:
+        """Verify context show command prints error message when file is malformed."""
+        with patch.object(Path, "cwd", return_value=self.project_root):
+            desc_file = self.project_root / "project_description.md"
+            desc_file.write_text("## Description\nMissing title header\n", encoding="utf-8")
+            
+            result = self.runner.invoke(
+                cli,
+                ["context", "show"],
+                obj={"project_root": self.project_root},
+            )
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("Context file found but could not be parsed.", result.output)
+
+    def test_context_show_success(self) -> None:
+        """Verify context show command prints formatted context when successful."""
+        with patch.object(Path, "cwd", return_value=self.project_root):
+            desc_file = self.project_root / "project_description.md"
+            desc_file.write_text(
+                "# Test Project\n\n## Description\nSome description\n\n## Tech Stack\n- Python\n",
+                encoding="utf-8"
+            )
+            
+            result = self.runner.invoke(
+                cli,
+                ["context", "show"],
+                obj={"project_root": self.project_root},
+            )
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("--- PROJECT CONTEXT ---", result.output)
+            self.assertIn("Project: Test Project", result.output)
+
+    def test_context_init_success(self) -> None:
+        """Verify context init command creates project_description.md."""
+        with patch.object(Path, "cwd", return_value=self.project_root):
+            desc_file = self.project_root / "project_description.md"
+            if desc_file.exists():
+                desc_file.unlink()
+                
+            result = self.runner.invoke(
+                cli,
+                ["context", "init"],
+                obj={"project_root": self.project_root},
+            )
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("Created project_description.md — fill in the sections and re-run.", result.output)
+            self.assertTrue(desc_file.exists())
+            self.assertIn("# Project Name", desc_file.read_text(encoding="utf-8"))
+
+    def test_context_init_already_exists(self) -> None:
+        """Verify context init command does not overwrite an existing file."""
+        with patch.object(Path, "cwd", return_value=self.project_root):
+            desc_file = self.project_root / "project_description.md"
+            desc_file.write_text("existing content", encoding="utf-8")
+            
+            result = self.runner.invoke(
+                cli,
+                ["context", "init"],
+                obj={"project_root": self.project_root},
+            )
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("project_description.md already exists.", result.output)
+            self.assertEqual(desc_file.read_text(encoding="utf-8"), "existing content")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from time import perf_counter
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, TYPE_CHECKING
 
 from core.base_agent import BaseAgent
+from core.project_context import ProjectContextLoader
 from core.decision_log import DecisionLogger
 from core.evaluation.base_evaluator import EvaluationResult
 from core.evaluation.evaluation_store import EvaluationStore
@@ -22,6 +23,7 @@ from core.evaluation.schema_validator import SchemaValidator, ValidationResult
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
 from core.observability.tracer import Tracer, SpanStatus
+from core.notifications.telegram_notifier import TelegramNotifier
 
 if TYPE_CHECKING:
     from core.intelligence.collaboration import CollaborationBroker
@@ -89,6 +91,7 @@ TARGET_CODE_WRITING_AGENT = "code_writing_agent"
 TARGET_DOCS_AGENT = "docs_agent"
 TARGET_PLANNING_AGENT = "planning_agent"
 TARGET_TEST_AGENT = "test_agent"
+TARGET_PROJECT_INTAKE_AGENT = "project_intake_agent"
 
 SEMANTIC_TARGET_ALIASES = {
     "planning": TARGET_PLANNING_AGENT,
@@ -239,6 +242,25 @@ def _sanitize_table_value(value: str) -> str:
 class CloneAgent(BaseAgent):
     """Supervisor agent that classifies events and dispatches agent work."""
 
+    SYSTEM_PROMPT = """You are the engineering supervisor for a software project.
+Your role is to make autonomous decisions about routine work
+and escalate important decisions to the human developer.
+
+ALWAYS:
+- Log every decision with explicit reasoning
+- Route events to the correct specialist agent
+- Keep tasks small and atomic
+- Escalate when uncertain
+
+NEVER:
+- Make architectural decisions autonomously
+- Delete files without escalation
+- Add new external dependencies without escalation
+- Proceed when blocked — find parallel work instead
+
+{project_context}"""
+
+
     def __init__(
         self,
         model_provider: ModelProvider,
@@ -255,6 +277,9 @@ class CloneAgent(BaseAgent):
         semantic_router: Optional["SemanticRouter"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
         tracer: Optional[Tracer] = None,
+        context_loader: Optional[ProjectContextLoader] = None,
+        notifier: Optional[TelegramNotifier] = None,
+        phase_manager: Optional[Any] = None,
     ) -> None:
         """Initialize CloneAgent state and required project log files."""
         super().__init__(
@@ -264,6 +289,7 @@ class CloneAgent(BaseAgent):
             logger,
             memory_manager=memory_manager,
             collaboration_broker=collaboration_broker,
+            context_loader=context_loader,
         )
         self.project_root = Path(project_root)
         self.event_queue = list(queued_events or [])
@@ -276,6 +302,8 @@ class CloneAgent(BaseAgent):
         self.quality_gate = quality_gate
         self.semantic_router = semantic_router
         self.tracer = tracer
+        self.notifier = notifier
+        self.phase_manager = phase_manager
         self.decision_logger = DecisionLogger(self.project_root)
         self._ensure_project_files()
         self._processed_timestamps: List[float] = []
@@ -334,6 +362,15 @@ class CloneAgent(BaseAgent):
 
     def dispatch(self, event: AgentEvent) -> List[AgentEvent]:
         """Create and optionally submit child events for responsible agents."""
+        if event.event_type is EventType.PLAN_APPROVED:
+            if self.phase_manager is not None:
+                self.phase_manager.approve_phase(event.payload.get("approval_id"))
+            return []
+        if event.event_type is EventType.PHASE_COMPLETE:
+            if self.phase_manager is not None:
+                self.phase_manager.complete_phase(event.payload.get("project_name"), event.payload.get("phase_id"))
+            return []
+
         import time
         from time import perf_counter
         now = perf_counter()
@@ -378,6 +415,22 @@ class CloneAgent(BaseAgent):
                 [timestamp, event.event_id, safe_reason, LOG_STATUS_PENDING]
             )
             _append_atomically(self._escalation_queue_path, row)
+            if self.notifier is not None:
+                title = f"Escalation: {event.event_type.value}"
+                details = f"Source: {event.source_agent}"
+                if event.payload:
+                    filtered = {
+                        k: v for k, v in event.payload.items()
+                        if k not in ("code", "content", "file_content", "result", "output")
+                    }
+                    if filtered:
+                        details += f"\nPayload: {filtered}"
+                self.notifier.send_escalation(
+                    title=title,
+                    reason=reason,
+                    event_id=event.event_id,
+                    details=details,
+                )
             self._log_decision(event, DecisionCategory.ESCALATE, reason, duration_ms)
             self.logger.warning(row.strip())
             if span:
@@ -682,6 +735,8 @@ class CloneAgent(BaseAgent):
             return [self._target_for_backlog(event.payload)]
         if event.event_type is EventType.MANUAL_TRIGGER:
             return self._manual_trigger_targets(event.payload)
+        if event.event_type is EventType.NEW_PROJECT:
+            return [TARGET_PROJECT_INTAKE_AGENT]
         return []
 
     def _semantic_dispatch_targets(self, event: AgentEvent) -> List[str]:

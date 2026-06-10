@@ -15,6 +15,7 @@ from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventPriority, EventType
 from core.intelligence.collaboration import ConsultationType
 from core.model_provider import ModelProvider
+from core.project_context import ProjectContextLoader
 
 if TYPE_CHECKING:
     from core.intelligence.collaboration import CollaborationBroker
@@ -37,16 +38,7 @@ TEMP_SUFFIX = ".tmp"
 BACKLOG_FILE_NAME = "backlog.md"
 DECISIONS_LOG_NAME = "decisions.log"
 
-SYSTEM_PROMPT = (
-    "You are a senior staff engineer and product strategist.\n"
-    "You receive a feature description and must decompose it into \n"
-    "engineering tasks. Output must be valid JSON only, no markdown.\n"
-    "Each task must have: id, title, type (feature/bug/refactor/test/docs),\n"
-    "priority (HIGH/MEDIUM/LOW), estimated_complexity (S/M/L/XL),\n"
-    "dependencies (list of task ids), acceptance_criteria (list of strings),\n"
-    "agent_assignment (which agent should execute this),\n"
-    "blocked_by (null or description of blocker)."
-)
+# Global SYSTEM_PROMPT removed (defined as class attribute instead)
 MEMORY_SYSTEM_PROMPT_TEMPLATE = (
     "{system_prompt}\n\n"
     "Similar planning decisions from this project:\n{memories}"
@@ -175,6 +167,11 @@ class Task:
     file_path: Optional[str]
     created_at: str
     status: str
+    parent_task_id: Optional[str] = None
+
+    def to_dict_str(self) -> str:
+        """Return a JSON string representation of the task dictionary."""
+        return json.dumps(asdict(self), indent=2)
 
     def to_markdown(self) -> str:
         """Render this task as compact markdown for agent consultation."""
@@ -243,6 +240,27 @@ def _append_atomically(path: Path, content: str) -> None:
 class PlanningAgent(BaseAgent):
     """Agent that decomposes feature descriptions into backlog tasks."""
 
+    SYSTEM_PROMPT = """You are a senior engineering project manager.
+Your role is to decompose feature requests into small,
+executable engineering tasks.
+
+ALWAYS:
+- Break work into tasks that touch ONE file maximum
+- Write explicit acceptance criteria for each task
+- Mark dependencies accurately
+- Assign complexity: S (< 2 hours) or M (< 4 hours) only
+- Never assign L or XL — split instead
+
+NEVER:
+- Create tasks that require changing 3+ files simultaneously
+- Create tasks without acceptance criteria
+- Assume unstated requirements
+- Plan beyond the current phase
+
+Output format: Valid JSON only. No markdown. No explanation.
+{project_context}"""
+
+
     def __init__(
         self,
         model_provider: ModelProvider,
@@ -251,6 +269,7 @@ class PlanningAgent(BaseAgent):
         context_retriever: Optional["ContextRetriever"] = None,
         memory_manager: Optional["MemoryManager"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
+        context_loader: Optional[ProjectContextLoader] = None,
     ) -> None:
         """Initialize PlanningAgent with model access and project paths."""
         super().__init__(
@@ -261,6 +280,7 @@ class PlanningAgent(BaseAgent):
             context_retriever=context_retriever,
             memory_manager=memory_manager,
             collaboration_broker=collaboration_broker,
+            context_loader=context_loader,
         )
         self.project_root = Path(project_root)
 
@@ -284,16 +304,36 @@ class PlanningAgent(BaseAgent):
             codebase_context,
         )
 
+        system_prompt = self.build_system_prompt(self.SYSTEM_PROMPT)
+        if memories:
+            system_prompt = MEMORY_SYSTEM_PROMPT_TEMPLATE.format(
+                system_prompt=system_prompt,
+                memories=memories,
+            )
+
+        params = self.get_model_params()
         model_output = self.model_provider.complete(
             prompt,
-            self._system_prompt(memories),
-            MODEL_MAX_TOKENS,
+            system_prompt,
+            params["max_tokens"],
+            temperature=params["temperature"],
+            top_p=params["top_p"],
+            agent_name=self.name,
         )
         try:
             tasks = self.parse_tasks(model_output)
         except ValueError as error:
             self.logger.error(LOGGER_ERROR_FORMAT, DECISION_REASON_INVALID_JSON, error)
             return self._failure_result(event, DECISION_REASON_INVALID_JSON)
+
+        from core.task_decomposer import TaskDecomposer
+        decomposer = TaskDecomposer(self.model_provider)
+        all_tasks = decomposer.decompose_batch(tasks)
+        self.logger.info(
+            f"Planning complete: {len(tasks)} original tasks "
+            f"→ {len(all_tasks)} after decomposition"
+        )
+        tasks = all_tasks
 
         self._consult_for_extra_large_tasks(tasks)
         self.write_backlog(tasks)
@@ -400,14 +440,6 @@ class PlanningAgent(BaseAgent):
             )
         return PROMPT_SECTION_SEPARATOR.join(prompt_parts)
 
-    def _system_prompt(self, memories: str) -> str:
-        """Return the planning system prompt with optional memory context."""
-        if not memories:
-            return SYSTEM_PROMPT
-        return MEMORY_SYSTEM_PROMPT_TEMPLATE.format(
-            system_prompt=SYSTEM_PROMPT,
-            memories=memories,
-        )
 
     def _extract_task_items(self, parsed_output: Any) -> List[Mapping[str, Any]]:
         """Extract task mappings from supported JSON shapes."""

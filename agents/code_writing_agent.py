@@ -11,12 +11,14 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, TYPE_CHECKING
 
 from core.base_agent import BaseAgent
+from core.project_context import ProjectContextLoader
 from core.evaluation.static_analyzer import StaticAnalysisReport, StaticAnalyzer
 from core.events import AgentEvent, AgentResult, EventType
 from core.intelligence.collaboration import ConsultationType
 from core.model_provider import ModelProvider
 from core.observability.tracer import Tracer, SpanStatus
 
+from core.pre_write_validator import PreWriteValidator
 from core.safety import SafetyPolicy, SafetyResult
 
 if TYPE_CHECKING:
@@ -39,16 +41,7 @@ TEMP_SUFFIX = ".tmp"
 DECISIONS_LOG_NAME = "decisions.log"
 MODEL_MAX_TOKENS = 8192
 
-SYSTEM_PROMPT = (
-    "You are a senior Python software engineer with strong principles.\n"
-    "You write clean, well-structured, documented Python code.\n"
-    "You follow these rules strictly:\n"
-    "- Every function has a docstring\n"
-    "- Every function has type hints\n"
-    "- No hardcoded values - use config or environment\n"
-    "- Write the simplest code that satisfies requirements\n"
-    "- Output ONLY the code block, no explanation, no markdown fences"
-)
+# Global SYSTEM_PROMPT removed (defined as class attribute instead)
 CONTEXT_SYSTEM_PROMPT_TEMPLATE = (
     "{system_prompt}\n\n"
     "You have access to relevant codebase context:\n{context}"
@@ -151,6 +144,26 @@ def _append_atomically(path: Path, content: str) -> None:
 class CodeWritingAgent(BaseAgent):
     """Agent that writes Python code from structured task events."""
 
+    SYSTEM_PROMPT = """You are a senior Python software engineer.
+Your role is to write clean, production-quality code.
+
+ALWAYS:
+- Add type hints to every function
+- Add docstrings to every function and class
+- Follow existing patterns in the file you are modifying
+- Write the minimum code that satisfies acceptance criteria
+- Respect the 150-line output limit per task
+
+NEVER:
+- Refactor code not mentioned in the task
+- Add imports not required for this specific task
+- Hardcode values that should be configurable
+- Output markdown — code only
+
+Output: Raw Python code only. No explanation. No fences.
+{project_context}"""
+
+
     def __init__(
         self,
         model_provider: ModelProvider,
@@ -162,6 +175,7 @@ class CodeWritingAgent(BaseAgent):
         memory_manager: Optional["MemoryManager"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
         tracer: Optional[Tracer] = None,
+        context_loader: Optional[ProjectContextLoader] = None,
     ) -> None:
         """Initialize CodeWritingAgent with model access and project paths."""
         super().__init__(
@@ -172,11 +186,17 @@ class CodeWritingAgent(BaseAgent):
             context_retriever=context_retriever,
             memory_manager=memory_manager,
             collaboration_broker=collaboration_broker,
+            context_loader=context_loader,
         )
         self.project_root = Path(project_root)
         self.safety_policy = safety_policy
         self.static_analyzer = static_analyzer
         self.tracer = tracer
+
+    @property
+    def token_budget(self) -> Optional[Any]:
+        """Get the token budget manager from model provider."""
+        return getattr(self.model_provider, "token_budget", None)
 
     def handle(self, event: AgentEvent) -> AgentResult:
         """Write code for an incoming task event and emit CODE_WRITTEN."""
@@ -192,74 +212,154 @@ class CodeWritingAgent(BaseAgent):
                     span.finish(SpanStatus.OK)
                 return res
 
-            task_id = str(event.payload[PAYLOAD_KEY_TASK_ID])
-            file_path = self._resolve_path(str(event.payload[PAYLOAD_KEY_FILE_PATH]))
-            if span:
-                span.tags["file_path"] = str(file_path)
+            params = self.get_model_params()
+            original_max_context_tokens = None
+            if self.token_budget and self.token_budget.conservative_mode_active(self.name):
+                self.logger.info(f"Conservative mode active for {self.name}")
+                if self.context_retriever:
+                    original_max_context_tokens = self.context_retriever.max_context_tokens
+                    self.context_retriever.max_context_tokens = original_max_context_tokens // 2
 
-            existing_code = self._existing_code(file_path, event.payload)
-            architecture_guidance = self._architecture_guidance(
-                event.payload,
-                existing_code,
-            )
-            prompt = self._build_prompt(
-                event.payload,
-                existing_code,
-                architecture_guidance,
-            )
-            context = self.get_context(
-                task_description=str(event.payload.get(PAYLOAD_KEY_TASK_DESCRIPTION, EMPTY_TEXT)),
-                file_path=str(file_path),
-            )
-            model_output = self.model_provider.complete(
-                prompt,
-                self._system_prompt(context),
-                MODEL_MAX_TOKENS,
-            )
-            code = self._normalize_model_code(model_output)
-            safety_result = self._validate_safe_write(event, file_path, code)
-            if safety_result is not None and safety_result.diff_preview:
-                self._log_decision(event, DECISION_DIFF_PREVIEW, safety_result.diff_preview)
-            if safety_result is not None and not safety_result.allowed:
-                res = self._safety_failure_result(event, file_path, safety_result)
+            try:
+                task_id = str(event.payload[PAYLOAD_KEY_TASK_ID])
+                file_path = self._resolve_path(str(event.payload[PAYLOAD_KEY_FILE_PATH]))
+                if span:
+                    span.tags["file_path"] = str(file_path)
+
+                existing_code = self._existing_code(file_path, event.payload)
+                architecture_guidance = self._architecture_guidance(
+                    event.payload,
+                    existing_code,
+                )
+                prompt = self._build_prompt(
+                    event.payload,
+                    existing_code,
+                    architecture_guidance,
+                )
+                context = self.get_context(
+                    task_description=str(event.payload.get(PAYLOAD_KEY_TASK_DESCRIPTION, EMPTY_TEXT)),
+                    file_path=str(file_path),
+                )
+                system_prompt = self.build_system_prompt(self.SYSTEM_PROMPT)
+                if context:
+                    system_prompt = CONTEXT_SYSTEM_PROMPT_TEMPLATE.format(
+                        system_prompt=system_prompt,
+                        context=context,
+                    )
+                model_output = self.model_provider.complete(
+                    prompt,
+                    system_prompt,
+                    params["max_tokens"],
+                    temperature=params["temperature"],
+                    top_p=params["top_p"],
+                    agent_name=self.name,
+                )
+
+                validator = PreWriteValidator()
+                existing_content = (
+                    file_path.read_text(encoding=ENCODING)
+                    if file_path.exists()
+                    else None
+                )
+                result = validator.validate(
+                    proposed_content=model_output,
+                    task_description=event.payload.get("task_description", ""),
+                    target_file_path=event.payload.get("file_path", ""),
+                    existing_content=existing_content,
+                )
+
+                if result.action == "RETRY_ONCE":
+                    self.logger.warning(
+                        f"Pre-write validation failed: {result.reason}. Retrying once."
+                    )
+                    retry_prompt = validator.retry_with_constraint(
+                        prompt,
+                        result,
+                        task_description=event.payload.get("task_description", ""),
+                    )
+                    model_output = self.model_provider.complete(
+                        retry_prompt,
+                        system_prompt,
+                        params["max_tokens"],
+                        temperature=params["temperature"],
+                        top_p=params["top_p"],
+                        agent_name=self.name,
+                    )
+                    result = validator.validate(
+                        proposed_content=model_output,
+                        task_description=event.payload.get("task_description", ""),
+                        target_file_path=event.payload.get("file_path", ""),
+                        existing_content=existing_content,
+                    )
+                    if result.action != "WRITE":
+                        self.logger.error("Retry also failed validation. Task discarded.")
+                        if span:
+                            span.finish(SpanStatus.OK)
+                        return AgentResult(
+                            success=False,
+                            output={"validation_failed": True, "reason": result.reason},
+                            escalate=True,
+                            escalation_reason=f"Output failed validation twice: {result.reason}",
+                        )
+
+                if result.action == "DISCARD":
+                    self.logger.warning(f"Output discarded: {result.reason}")
+                    if span:
+                        span.finish(SpanStatus.OK)
+                    return AgentResult(
+                        success=False,
+                        output={"discarded": True, "reason": result.reason},
+                        escalate=True,
+                        escalation_reason=f"Output discarded: {result.reason}",
+                    )
+
+                code = self._normalize_model_code(model_output)
+                safety_result = self._validate_safe_write(event, file_path, code)
+                if safety_result is not None and safety_result.diff_preview:
+                    self._log_decision(event, DECISION_DIFF_PREVIEW, safety_result.diff_preview)
+                if safety_result is not None and not safety_result.allowed:
+                    res = self._safety_failure_result(event, file_path, safety_result)
+                    if span:
+                        span.finish(SpanStatus.OK)
+                    return res
+                escalation_reason = self._safety_warning_reason(file_path, safety_result)
+                _write_atomically(file_path, code)
+
+                line_count = self._line_count(code)
+                reasoning = DECISION_REASON_WRITTEN_TEMPLATE.format(
+                    line_count=line_count,
+                    file_path=str(file_path),
+                    task_id=task_id,
+                )
+                self._log_decision(event, DECISION_SUCCESS, reasoning)
+                static_report = self._run_static_analysis(event, file_path)
+                static_report_path = self._write_static_report(event, static_report)
+                static_escalation_reason = self._static_escalation_reason(
+                    event,
+                    static_report,
+                )
+                if static_escalation_reason is not None:
+                    escalation_reason = static_escalation_reason
+                metadata = {}
+                if static_report_path is not None:
+                    metadata[METADATA_KEY_STATIC_REPORT] = str(static_report_path)
+                res = AgentResult(
+                    success=True,
+                    output={
+                        OUTPUT_KEY_FILE_PATH: str(file_path),
+                        OUTPUT_KEY_LINE_COUNT: line_count,
+                    },
+                    next_events=[self._code_written_event(event, file_path, line_count)],
+                    escalate=bool(escalation_reason),
+                    escalation_reason=escalation_reason,
+                    metadata=metadata,
+                )
                 if span:
                     span.finish(SpanStatus.OK)
                 return res
-            escalation_reason = self._safety_warning_reason(file_path, safety_result)
-            _write_atomically(file_path, code)
-
-            line_count = self._line_count(code)
-            reasoning = DECISION_REASON_WRITTEN_TEMPLATE.format(
-                line_count=line_count,
-                file_path=str(file_path),
-                task_id=task_id,
-            )
-            self._log_decision(event, DECISION_SUCCESS, reasoning)
-            static_report = self._run_static_analysis(event, file_path)
-            static_report_path = self._write_static_report(event, static_report)
-            static_escalation_reason = self._static_escalation_reason(
-                event,
-                static_report,
-            )
-            if static_escalation_reason is not None:
-                escalation_reason = static_escalation_reason
-            metadata = {}
-            if static_report_path is not None:
-                metadata[METADATA_KEY_STATIC_REPORT] = str(static_report_path)
-            res = AgentResult(
-                success=True,
-                output={
-                    OUTPUT_KEY_FILE_PATH: str(file_path),
-                    OUTPUT_KEY_LINE_COUNT: line_count,
-                },
-                next_events=[self._code_written_event(event, file_path, line_count)],
-                escalate=bool(escalation_reason),
-                escalation_reason=escalation_reason,
-                metadata=metadata,
-            )
-            if span:
-                span.finish(SpanStatus.OK)
-            return res
+            finally:
+                if original_max_context_tokens is not None and self.context_retriever:
+                    self.context_retriever.max_context_tokens = original_max_context_tokens
         except Exception as e:
             if span:
                 span.finish(SpanStatus.ERROR, error=str(e))
@@ -476,14 +576,6 @@ class CodeWritingAgent(BaseAgent):
             return False
         return estimated_complexity.strip().upper() in COMPLEX_TASK_COMPLEXITIES
 
-    def _system_prompt(self, context: Optional[str]) -> str:
-        """Return the writing system prompt with optional codebase context."""
-        if not context:
-            return SYSTEM_PROMPT
-        return CONTEXT_SYSTEM_PROMPT_TEMPLATE.format(
-            system_prompt=SYSTEM_PROMPT,
-            context=context,
-        )
 
     def _criteria_lines(self, value: Any) -> str:
         """Render acceptance criteria for the model prompt."""

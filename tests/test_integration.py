@@ -102,7 +102,7 @@ def test_blocked_task_resumes_after_permission(
                     TARGET_AGENT_KEY: CODE_WRITING_AGENT_ALIAS,
                     TASK_ID_KEY: "PLAN-20260605-900",
                     FILE_PATH_KEY: str(blocked_path),
-                    TASK_DESCRIPTION_KEY: "Write blocked file.",
+                    TASK_DESCRIPTION_KEY: "implement generated helper function",
                     ACCEPTANCE_CRITERIA_KEY: ["File is written"],
                 },
                 correlation_id=BLOCKED_CORRELATION_ID,
@@ -220,6 +220,7 @@ def _patch_pytest_run(monkeypatch: Any) -> None:
         cwd: Path,
         capture_output: bool,
         text: bool,
+        **kwargs: Any,
     ) -> subprocess.CompletedProcess[str]:
         """Return a successful pytest process result."""
         return subprocess.CompletedProcess(
@@ -265,6 +266,8 @@ class MockModelProvider:
         max_tokens: int,
         agent_name: str | None = None,
         token_budget: Any = None,
+        *args,
+        **kwargs,
     ) -> str:
         """Return deterministic model output for one agent."""
         self.calls.append((prompt, system_prompt, max_tokens))

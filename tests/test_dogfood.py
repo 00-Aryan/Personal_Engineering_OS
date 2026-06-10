@@ -3,14 +3,35 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
+from unittest.mock import patch
 
 import pytest
 from core.events import AgentEvent, EventType
 from core.projectos import ProjectOS
 from scripts import dogfood
 from scripts.provider_setup import PROVIDER_STATUS_VERSION
+
+
+@pytest.fixture(autouse=True)
+def cleanup_timers() -> Generator[None, None, None]:
+    """Ensure any threading.Timer instances started during tests are canceled on teardown."""
+    timers = []
+    original_timer = threading.Timer
+
+    def mock_timer(*args: Any, **kwargs: Any) -> threading.Timer:
+        t = original_timer(*args, **kwargs)
+        timers.append(t)
+        return t
+
+    with patch("threading.Timer", side_effect=mock_timer):
+        try:
+            yield
+        finally:
+            for t in timers:
+                t.cancel()
 
 
 def setup_dummy_project(tmp_path: Path) -> Path:

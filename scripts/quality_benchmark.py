@@ -202,7 +202,9 @@ class MockBenchmarkProvider(ModelProvider):
         self,
         prompt: str,
         system_prompt: str,
-        max_tokens: int,
+        max_tokens: int = 1000,
+        *args: Any,
+        **kwargs: Any,
     ) -> str:
         """Return a deterministic completion for the configured agent."""
         if self.agent_name == AGENT_CODE_REVIEW:

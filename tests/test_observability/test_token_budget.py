@@ -207,3 +207,77 @@ agents:
     assert "TOKEN_BUDGET_EXCEEDED" in result
     mock_complete.assert_not_called()
 
+
+def test_conservative_mode_inactive_below_threshold(tmp_path):
+    budgets = {
+        "code_writing": {
+            "daily_limit": 1000,
+        }
+    }
+    tb = TokenBudget(tmp_path, budgets=budgets)
+    tb.check_and_record("code_writing", "a" * 1200)  # 300 prompt tokens
+    tb.record_completion("code_writing", "b" * 800)  # 200 completion tokens. Total 500
+    assert tb.conservative_mode_active("code_writing") is False
+
+
+def test_conservative_mode_active_at_threshold(tmp_path):
+    budgets = {
+        "code_writing": {
+            "daily_limit": 1000,
+        }
+    }
+    tb = TokenBudget(tmp_path, budgets=budgets)
+    tb.check_and_record("code_writing", "a" * 1200)  # 300 prompt tokens
+    tb.record_completion("code_writing", "b" * 1200)  # 300 completion tokens. Total 600
+    assert tb.conservative_mode_active("code_writing") is True
+
+
+def test_check_daily_threshold_alert_returns_string(tmp_path):
+    budgets = {
+        "code_writing": {
+            "daily_limit": 1000,
+        }
+    }
+    tb = TokenBudget(tmp_path, budgets=budgets)
+    tb.check_and_record("code_writing", "a" * 1600)  # 400 prompt tokens
+    tb.record_completion("code_writing", "b" * 1200)  # 300 completion tokens. Total 700
+    alert = tb.check_daily_threshold_alert("code_writing")
+    assert alert is not None
+    assert "conservative" in alert.lower()
+
+
+from agents.code_writing_agent import CodeWritingAgent
+from core.events import AgentEvent, EventType
+from unittest.mock import ANY
+
+def test_conservative_mode_reduces_token_limits(tmp_path):
+    mock_tb = MagicMock()
+    mock_tb.conservative_mode_active.return_value = True
+
+    mock_provider = MagicMock()
+    mock_provider.complete.return_value = "def dummy_func():\n    pass\n"
+    mock_provider.token_budget = mock_tb
+
+    logger = MagicMock()
+    agent = CodeWritingAgent(
+        model_provider=mock_provider,
+        logger=logger,
+        project_root=tmp_path,
+    )
+
+    event = AgentEvent(
+        event_type=EventType.CODE_WRITTEN,
+        source_agent="planning",
+        payload={
+            "task_id": "TASK_TEST",
+            "file_path": "dummy.py",
+            "task_description": "write dummy function",
+            "acceptance_criteria": ["criteria 1"],
+        }
+    )
+
+    agent.handle(event)
+
+    args, kwargs = mock_provider.complete.call_args
+    assert args[2] == 500
+

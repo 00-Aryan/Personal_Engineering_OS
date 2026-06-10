@@ -18,8 +18,11 @@ from agents.code_writing_agent import CodeWritingAgent
 from agents.docs_agent import DocsAgent
 from agents.planning_agent import PlanningAgent
 from agents.test_agent import TestAgent
+from agents.project_intake_agent import ProjectIntakeAgent
+from core.phase_manager import PhaseManager
 from core.agent_registry import AgentRegistry
 from core.clone_agent import CloneAgent
+from core.notifications.telegram_notifier import TelegramNotifier
 from core.observability.tracer import Tracer, TraceStore
 from core.observability.token_budget import TokenBudget
 from core.observability.cost_tracker import CostTracker
@@ -55,6 +58,7 @@ from core.intelligence.semantic_router import (
 from core.intelligence.vector_store import VectorStoreFactory
 from core.model_provider import GeminiProvider, OllamaProvider, OpenRouterProvider
 from core.persistence import PersistenceManager
+from core.project_context import ProjectContextLoader
 from core.project_config import ProjectConfig, ProjectRegistry
 from core.provider_health import ProviderHealthMonitor
 from core.safety import DefaultSafetyPolicy
@@ -84,6 +88,7 @@ AGENT_CODE_REVIEW = "code_review"
 AGENT_ARCHITECTURE = "architecture"
 AGENT_TEST = "test"
 AGENT_DOCS = "docs"
+AGENT_PROJECT_INTAKE = "project_intake"
 
 ALIAS_SUFFIX = "_agent"
 WORKER_AGENT_NAMES = (
@@ -93,6 +98,7 @@ WORKER_AGENT_NAMES = (
     AGENT_ARCHITECTURE,
     AGENT_TEST,
     AGENT_DOCS,
+    AGENT_PROJECT_INTAKE,
 )
 ALL_AGENT_NAMES = (AGENT_CLONE,) + WORKER_AGENT_NAMES
 
@@ -216,6 +222,7 @@ class ProjectOS:
         self.logger = logging.getLogger(f"{LOGGER_NAME}.{self.project_name}")
         self.trace_store = TraceStore(self.state_dir)
         self.tracer = Tracer(self.trace_store, enabled=True)
+        self.notifier = TelegramNotifier.from_env(project_root=self.project_root)
 
         token_budgets_config = None
         self.quality_gates_config = {}
@@ -358,13 +365,14 @@ class ProjectOS:
             self.state_dir / GATE_LOG_NAME,
             tracer=self.tracer,
         )
-        self.alert_manager = AlertManager(self.state_dir, alerts_config=alerts_config)
+        self.alert_manager = AlertManager(self.state_dir, alerts_config=alerts_config, notifier=self.notifier)
         self.quality_evaluators = self._initialize_quality_evaluators()
         self.task_queue = TaskQueue(
             max_workers=TASK_QUEUE_WORKERS,
             result_callback=self._handle_agent_result,
             persistence_manager=self.persistence_manager,
         )
+        self.context_loader = ProjectContextLoader(self.project_root)
         self.clone_agent = self._initialize_agents()
         self.trigger_system = TriggerSystem(
             self.project_root,
@@ -374,6 +382,67 @@ class ProjectOS:
             code_indexer=self.code_indexer,
         )
         self._event_thread: Optional[threading.Thread] = None
+
+        # Project rotation & Daily UX initialization
+        from core.project_scheduler import ProjectScheduler
+        from core.notifications.brief_generator import BriefGenerator
+        self.project_scheduler = ProjectScheduler(
+            phase_manager=self.phase_manager,
+            notifier=self.notifier,
+            state_dir=self.state_dir,
+        )
+        
+        projects_section = self.config.get("projects", {})
+        active_projects = projects_section.get("active", [])
+        for proj in active_projects:
+            self.project_scheduler.register_project(
+                project_name=proj["name"],
+                project_root=Path(proj["path"]).expanduser(),
+                priority=proj.get("priority", 1),
+            )
+            
+        project_roots = [
+            Path(proj["path"]).expanduser()
+            for proj in active_projects
+        ]
+        self.brief_generator = BriefGenerator(
+            notifier=self.notifier,
+            state_dir=self.state_dir,
+            project_roots=project_roots,
+        )
+
+        self.commander: Optional[TelegramCommander] = None
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        from core.notifications.telegram_notifier import DisabledNotifier
+        if bot_token and chat_id and not isinstance(self.notifier, DisabledNotifier):
+            from core.notifications.command_registry import CommandRegistry
+            from core.notifications.telegram_commander import TelegramCommander
+
+            self.command_registry = CommandRegistry(
+                self.clone_agent,
+                self.phase_manager,
+                self.notifier,
+                self.state_dir,
+                brief_generator=self.brief_generator,
+            )
+            self.commander = TelegramCommander(
+                bot_token=bot_token,
+                chat_id=chat_id,
+                command_handlers={
+                    "approve": self.command_registry.handle_approve,
+                    "reject": self.command_registry.handle_reject,
+                    "modify": self.command_registry.handle_modify,
+                    "status": self.command_registry.handle_status,
+                    "brief": self.command_registry.handle_brief,
+                    "digest": self.command_registry.handle_digest,
+                    "pause": self.command_registry.handle_pause,
+                    "resume": self.command_registry.handle_resume,
+                    "answer": self.command_registry.handle_answer,
+                    "help": self.command_registry.handle_help,
+                },
+                notifier=self.notifier,
+            )
 
     @classmethod
     def from_project_config(
@@ -410,9 +479,22 @@ class ProjectOS:
         self._build_code_index()
         self._log_memory_stats()
         self._restore_persisted_queue_state()
+        # Schedule daily briefs
+        notifications_config = self.config.get("notifications", {})
+        if notifications_config.get("telegram_enabled", False):
+            morning_time = notifications_config.get("morning_brief_time", "08:00")
+            evening_time = notifications_config.get("evening_digest_time", "21:00")
+            self.brief_generator.schedule_briefs(
+                morning_time=morning_time,
+                evening_time=evening_time,
+            )
+
+        self._check_project_rotation()
         self.provider_health_monitor.start()
         self.alert_manager.start()
         self.trigger_system.start()
+        if self.commander is not None:
+            self.commander.start()
         self._event_thread = threading.Thread(
             target=self._event_loop,
             name=LOGGER_NAME,
@@ -423,6 +505,10 @@ class ProjectOS:
     def stop(self) -> None:
         """Gracefully stop trigger watching, workers, and event processing."""
         self.stop_event.set()
+        if hasattr(self, "brief_generator"):
+            self.brief_generator.cancel_timers()
+        if self.commander is not None:
+            self.commander.stop()
         self.trigger_system.stop()
         self.provider_health_monitor.stop()
         self.alert_manager.stop()
@@ -440,6 +526,10 @@ class ProjectOS:
         import sys
         self.logger.info("Signal %d received, shutting down gracefully...", signum)
         self.stop_event.set()
+        if hasattr(self, "brief_generator"):
+            self.brief_generator.cancel_timers()
+        if self.commander is not None:
+            self.commander.stop()
         self.trigger_system.stop()
         self.provider_health_monitor.stop()
         
@@ -471,14 +561,28 @@ class ProjectOS:
             try:
                 event = self.event_queue.get(timeout=EVENT_QUEUE_TIMEOUT_SECONDS)
             except queue.Empty:
+                self._check_project_rotation()
                 continue
+            
+            prev_phase = self.phase_manager.get_current_phase(self.project_name)
             self.clone_agent.handle(event)
+            curr_phase = self.phase_manager.get_current_phase(self.project_name)
+            
+            if prev_phase is not None and (curr_phase is None or curr_phase.phase_id != prev_phase.phase_id):
+                self.project_scheduler.record_work_done(self.project_name)
+                self._check_project_rotation()
 
     def _handle_agent_result(self, result: AgentResult) -> None:
         """Route agent next_events back through Clone."""
         self.clone_agent.process_agent_result(result)
         for next_event in result.next_events:
+            prev_phase = self.phase_manager.get_current_phase(self.project_name)
             self.clone_agent.handle(next_event)
+            curr_phase = self.phase_manager.get_current_phase(self.project_name)
+            
+            if prev_phase is not None and (curr_phase is None or curr_phase.phase_id != prev_phase.phase_id):
+                self.project_scheduler.record_work_done(self.project_name)
+                self._check_project_rotation()
 
     def _build_code_index(self) -> IndexingReport:
         """Rebuild the project code index and log the report."""
@@ -562,6 +666,12 @@ class ProjectOS:
     def _initialize_agents(self) -> CloneAgent:
         """Initialize and register Clone plus all worker agents."""
         logger = self.logger
+        self.phase_manager = PhaseManager(
+            notifier=self.notifier,
+            state_dir=self.state_dir,
+            task_queue=self.task_queue,
+            agent_registry=self.agent_registry,
+        )
         worker_agents = {
             AGENT_PLANNING: PlanningAgent(
                 self.providers[AGENT_PLANNING],
@@ -570,6 +680,7 @@ class ProjectOS:
                 context_retriever=self.context_retriever,
                 memory_manager=self.memory_manager,
                 collaboration_broker=self.collaboration_broker,
+                context_loader=self.context_loader,
             ),
             AGENT_CODE_WRITING: CodeWritingAgent(
                 self.providers[AGENT_CODE_WRITING],
@@ -581,6 +692,7 @@ class ProjectOS:
                 memory_manager=self.memory_manager,
                 collaboration_broker=self.collaboration_broker,
                 tracer=self.tracer,
+                context_loader=self.context_loader,
             ),
             AGENT_CODE_REVIEW: CodeReviewAgent(
                 self.providers[AGENT_CODE_REVIEW],
@@ -591,6 +703,7 @@ class ProjectOS:
                 memory_manager=self.memory_manager,
                 collaboration_broker=self.collaboration_broker,
                 tracer=self.tracer,
+                context_loader=self.context_loader,
             ),
             AGENT_ARCHITECTURE: ArchitectureAgent(
                 self.providers[AGENT_ARCHITECTURE],
@@ -598,6 +711,7 @@ class ProjectOS:
                 project_root=self.project_root,
                 memory_manager=self.memory_manager,
                 collaboration_broker=self.collaboration_broker,
+                context_loader=self.context_loader,
             ),
             AGENT_TEST: TestAgent(
                 self.providers[AGENT_TEST],
@@ -605,6 +719,7 @@ class ProjectOS:
                 project_root=self.project_root,
                 memory_manager=self.memory_manager,
                 collaboration_broker=self.collaboration_broker,
+                context_loader=self.context_loader,
             ),
             AGENT_DOCS: DocsAgent(
                 self.providers[AGENT_DOCS],
@@ -612,6 +727,18 @@ class ProjectOS:
                 project_root=self.project_root,
                 memory_manager=self.memory_manager,
                 collaboration_broker=self.collaboration_broker,
+                context_loader=self.context_loader,
+            ),
+            AGENT_PROJECT_INTAKE: ProjectIntakeAgent(
+                self.providers[AGENT_PROJECT_INTAKE],
+                logger,
+                notifier=self.notifier,
+                memory_manager=self.memory_manager,
+                context_retriever=self.context_retriever,
+                context_loader=self.context_loader,
+                project_root=self.project_root,
+                state_dir=self.state_dir,
+                phase_manager=self.phase_manager,
             ),
         }
         for agent_name, agent_instance in worker_agents.items():
@@ -631,7 +758,12 @@ class ProjectOS:
             semantic_router=self.semantic_router,
             collaboration_broker=self.collaboration_broker,
             tracer=self.tracer,
+            context_loader=self.context_loader,
+            notifier=self.notifier,
+            phase_manager=self.phase_manager,
         )
+        self.phase_manager.clone_agent = clone_agent
+        self.agent_registry.register("phase_manager", self.phase_manager)
         self._register_agent_with_alias(AGENT_CLONE, clone_agent)
         return clone_agent
 
@@ -766,6 +898,14 @@ class ProjectOS:
             raise ValueError("ProjectOS config must define agents.")
         agent_config = agents.get(agent_name)
         if not isinstance(agent_config, Mapping):
+            if agent_name == "project_intake":
+                # Fallback to clone's provider assignment
+                clone_val = agents.get("clone")
+                if isinstance(clone_val, str):
+                    return {"provider": clone_val}
+                elif isinstance(clone_val, Mapping):
+                    return clone_val
+                return {"provider": "gemini-2.5-flash"}
             raise ValueError(f"ProjectOS config missing agent: {agent_name}")
         return agent_config
 
@@ -878,6 +1018,129 @@ class ProjectOS:
             "decisions_logged": decisions_logged,
             "errors": errors,
         }
+
+    def switch_context(self, next_project_name: str) -> None:
+        """Switch current ProjectOS context to the named project."""
+        if next_project_name == self.project_name:
+            return
+        
+        self.logger.info("Switching context from %s to %s", self.project_name, next_project_name)
+        
+        registry = ProjectRegistry()
+        config = registry.get_project(next_project_name)
+        if not config:
+            self.logger.error("Project %s not found in registry", next_project_name)
+            return
+
+        self.trigger_system.stop()
+
+        self.project_root = config.root_path
+        self.project_name = config.name
+        self.state_dir = config.state_dir
+        self.watch_patterns = config.watch_patterns
+        self.ignore_patterns = config.ignore_patterns
+
+        self.config_path = config.models_config
+        self.config = self._load_config()
+
+        self.trace_store = TraceStore(self.state_dir)
+        self.tracer.trace_store = self.trace_store
+        
+        self.token_budget = TokenBudget(self.state_dir)
+        self.cost_tracker = CostTracker(
+            self.state_dir,
+            usd_to_inr=self._get_usd_to_inr(),
+            pricing_catalog=self.config.get("pricing", {}).get("catalog", None)
+        )
+        self.cost_tracker.tracer = self.tracer
+
+        self.vector_store = VectorStoreFactory.create(
+            CODE_INDEX_COLLECTION_NAME,
+            self.state_dir,
+            self.embedder,
+        )
+        self.routing_vector_store = VectorStoreFactory.create(
+            ROUTING_EXAMPLES_COLLECTION,
+            self.state_dir,
+            self.embedder,
+        )
+        self.code_indexer = CodeIndexer(self.vector_store, self.embedder)
+        self.context_retriever = ContextRetriever(
+            self.vector_store,
+            self.embedder,
+            tracer=self.tracer,
+            token_budget=self.token_budget,
+        )
+        self.semantic_router = SemanticRouter(
+            self.embedder,
+            self.routing_vector_store,
+            log_path=self.state_dir / ROUTING_DECISIONS_FILE_NAME,
+        )
+        self.memory_store = MemoryStore(
+            VectorStoreFactory.create,
+            self.embedder,
+            self.state_dir,
+        )
+        self.memory_manager = MemoryManager(self.memory_store, self.embedder, tracer=self.tracer)
+        self.evaluation_store = EvaluationStore(self.state_dir)
+        self.quality_scorer.evaluation_store = self.evaluation_store
+        self.regression_detector = RegressionDetector(
+            self.evaluation_store,
+            self.state_dir,
+        )
+        self.quality_gate.regression_detector = self.regression_detector
+        self.quality_gate.log_path = self.state_dir / GATE_LOG_NAME
+
+        self.providers = self._initialize_providers()
+        self.git_manager = self._initialize_git_manager()
+        self.safety_policy = DefaultSafetyPolicy(self.project_root)
+        self.persistence_manager = PersistenceManager(self.state_dir)
+        self.context_loader = ProjectContextLoader(self.project_root)
+        
+        self.clone_agent = self._initialize_agents()
+
+        self.trigger_system = TriggerSystem(
+            self.project_root,
+            self.event_queue,
+            watch_patterns=self.watch_patterns,
+            ignore_patterns=self.ignore_patterns,
+            code_indexer=self.code_indexer,
+        )
+        
+        self._build_code_index()
+        self._log_memory_stats()
+        self._restore_persisted_queue_state()
+        
+        self.trigger_system.start()
+        
+        if self.commander is not None:
+            from core.notifications.command_registry import CommandRegistry
+            self.command_registry = CommandRegistry(
+                self.clone_agent,
+                self.phase_manager,
+                self.notifier,
+                self.state_dir,
+                brief_generator=self.brief_generator,
+            )
+            self.commander.command_handlers = {
+                "approve": self.command_registry.handle_approve,
+                "reject": self.command_registry.handle_reject,
+                "modify": self.command_registry.handle_modify,
+                "status": self.command_registry.handle_status,
+                "brief": self.command_registry.handle_brief,
+                "digest": self.command_registry.handle_digest,
+                "pause": self.command_registry.handle_pause,
+                "resume": self.command_registry.handle_resume,
+                "answer": self.command_registry.handle_answer,
+                "help": self.command_registry.handle_help,
+            }
+
+    def _check_project_rotation(self) -> None:
+        if not hasattr(self, "project_scheduler") or self.project_scheduler is None:
+            return
+        next_project = self.project_scheduler.get_next_project()
+        if next_project and next_project != self.project_name:
+            self.switch_context(next_project)
 
     def _log_final_status(self) -> None:
         """Append ProjectOS shutdown status to decisions.log."""

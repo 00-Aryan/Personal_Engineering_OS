@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from core.events import AgentEvent, AgentResult
 from core.intelligence.collaboration import ConsultationRequest, ConsultationType
 from core.model_provider import ModelProvider
+from core.project_context import ProjectContextLoader
 
 if TYPE_CHECKING:
     from core.intelligence.collaboration import CollaborationBroker
@@ -28,6 +29,7 @@ class BaseAgent(ABC):
         context_retriever: Optional["ContextRetriever"] = None,
         memory_manager: Optional["MemoryManager"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
+        context_loader: Optional[ProjectContextLoader] = None,
     ) -> None:
         """Initialize shared agent identity, model provider, and logger."""
         self.name = name
@@ -37,7 +39,21 @@ class BaseAgent(ABC):
         self.context_retriever = context_retriever
         self.memory_manager = memory_manager
         self.collaboration_broker = collaboration_broker
+        self.context_loader = context_loader
         self._current_consultation_depth = 0
+
+    def get_project_context_prompt(self) -> str:
+        """Load and format project context for system prompt injection."""
+        if self.context_loader is None:
+            return ""
+        ctx = self.context_loader.load()
+        if ctx is None:
+            return ""
+        return ProjectContextLoader.to_system_prompt_injection(ctx)
+
+    def build_system_prompt(self, base_prompt: str) -> str:
+        """Replace the project context placeholder with the loaded context prompt."""
+        return base_prompt.replace("{project_context}", self.get_project_context_prompt())
 
     @abstractmethod
     def handle(self, event: AgentEvent) -> AgentResult:
@@ -150,3 +166,34 @@ class BaseAgent(ABC):
             )
         except Exception as error:
             self.logger.warning("Workflow memory store failed for %s: %s", self.name, error)
+
+    @property
+    def token_budget(self) -> Optional[Any]:
+        """Get the token budget manager from model provider."""
+        return getattr(self.model_provider, "token_budget", None)
+
+    def get_model_params(self) -> Dict[str, Any]:
+        """Get model parameters (temperature, max_tokens, top_p) for this agent from configuration."""
+        defaults = {"temperature": 0.3, "max_tokens": 1000, "top_p": 0.9}
+        if not self.model_provider:
+            return defaults
+        
+        config = getattr(self.model_provider, "_config", {})
+        result = defaults.copy()
+        if isinstance(config, dict):
+            model_parameters = config.get("model_parameters", {})
+            if isinstance(model_parameters, dict):
+                agent_params = model_parameters.get(self.name, {})
+                if isinstance(agent_params, dict):
+                    result = {
+                        "temperature": agent_params.get("temperature", defaults["temperature"]),
+                        "max_tokens": agent_params.get("max_tokens", defaults["max_tokens"]),
+                        "top_p": agent_params.get("top_p", defaults["top_p"]),
+                    }
+        
+        # If conservative mode is active, override max_tokens to 500
+        tb = self.token_budget
+        if tb and hasattr(tb, "conservative_mode_active") and tb.conservative_mode_active(self.name):
+            result["max_tokens"] = min(result["max_tokens"], 500)
+            
+        return result

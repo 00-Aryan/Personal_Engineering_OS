@@ -120,7 +120,9 @@ class ModelProvider(ABC):
         self,
         prompt: str,
         system_prompt: str,
-        max_tokens: int,
+        max_tokens: int = 1000,
+        temperature: float = 0.3,
+        top_p: float = 0.9,
         agent_name: Optional[str] = None,
         token_budget: Optional[TokenBudget] = None,
         rate_limiter: Optional[Any] = None,
@@ -269,7 +271,9 @@ class OpenRouterProvider(ModelProvider):
         self,
         prompt: str,
         system_prompt: str,
-        max_tokens: int,
+        max_tokens: int = 1000,
+        temperature: float = 0.3,
+        top_p: float = 0.9,
         agent_name: Optional[str] = None,
         token_budget: Optional[TokenBudget] = None,
         rate_limiter: Optional[Any] = None,
@@ -316,7 +320,7 @@ class OpenRouterProvider(ModelProvider):
         cb = circuit_breaker or getattr(self, "circuit_breaker", None)
         def make_call():
             return self._with_retry(
-                lambda: self._complete_once(prompt, system_prompt, max_tokens)
+                lambda: self._complete_once(prompt, system_prompt, max_tokens, temperature, top_p)
             )
 
         try:
@@ -339,6 +343,8 @@ class OpenRouterProvider(ModelProvider):
                         prompt,
                         system_prompt,
                         max_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
                         agent_name=agent_name,
                         token_budget=token_budget,
                         rate_limiter=rate_limiter,
@@ -404,11 +410,13 @@ class OpenRouterProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        temperature: float,
+        top_p: float,
     ) -> str:
         """Return one non-retried complete response from OpenRouter."""
         response = self._post_json(
             url=self._required_config_value(CONFIG_KEY_COMPLETION_URL),
-            payload=self._chat_payload(prompt, system_prompt, max_tokens),
+            payload=self._chat_payload(prompt, system_prompt, max_tokens, temperature, top_p),
             headers=self._headers(),
         )
         response_payload = response.json()
@@ -450,6 +458,8 @@ class OpenRouterProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: Optional[int],
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
         stream: bool = False,
     ) -> Dict[str, Any]:
         """Build an OpenRouter chat completion payload."""
@@ -462,6 +472,10 @@ class OpenRouterProvider(ModelProvider):
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
         if stream:
             payload["stream"] = True
         return payload
@@ -476,7 +490,9 @@ class GeminiProvider(ModelProvider):
         self,
         prompt: str,
         system_prompt: str,
-        max_tokens: int,
+        max_tokens: int = 1000,
+        temperature: float = 0.3,
+        top_p: float = 0.9,
         agent_name: Optional[str] = None,
         token_budget: Optional[TokenBudget] = None,
         rate_limiter: Optional[Any] = None,
@@ -523,7 +539,7 @@ class GeminiProvider(ModelProvider):
         cb = circuit_breaker or getattr(self, "circuit_breaker", None)
         def make_call():
             return self._with_retry(
-                lambda: self._complete_once(prompt, system_prompt, max_tokens)
+                lambda: self._complete_once(prompt, system_prompt, max_tokens, temperature, top_p)
             )
 
         try:
@@ -546,6 +562,8 @@ class GeminiProvider(ModelProvider):
                         prompt,
                         system_prompt,
                         max_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
                         agent_name=agent_name,
                         token_budget=token_budget,
                         rate_limiter=rate_limiter,
@@ -614,11 +632,13 @@ class GeminiProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        temperature: float,
+        top_p: float,
     ) -> str:
         """Return one non-retried complete response from Gemini."""
         response = self._post_json(
             url=self._format_template_url(CONFIG_KEY_COMPLETION_URL_TEMPLATE),
-            payload=self._gemini_payload(prompt, system_prompt, max_tokens),
+            payload=self._gemini_payload(prompt, system_prompt, max_tokens, temperature, top_p),
         )
         return self._extract_text(response.json())
 
@@ -645,6 +665,8 @@ class GeminiProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: Optional[int],
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Build a Gemini generation payload."""
         payload: Dict[str, Any] = {
@@ -656,8 +678,16 @@ class GeminiProvider(ModelProvider):
                 }
             ],
         }
+        generation_config: Dict[str, Any] = {}
         if max_tokens is not None:
-            payload["generationConfig"] = {"maxOutputTokens": max_tokens}
+            generation_config["maxOutputTokens"] = max_tokens
+        if temperature is not None:
+            generation_config["temperature"] = temperature
+        if top_p is not None:
+            generation_config["topP"] = top_p
+            
+        if generation_config:
+            payload["generationConfig"] = generation_config
         return payload
 
     def _extract_text(self, payload: Mapping[str, Any]) -> str:
@@ -679,7 +709,9 @@ class OllamaProvider(ModelProvider):
         self,
         prompt: str,
         system_prompt: str,
-        max_tokens: int,
+        max_tokens: int = 1000,
+        temperature: float = 0.3,
+        top_p: float = 0.9,
         agent_name: Optional[str] = None,
         token_budget: Optional[TokenBudget] = None,
         rate_limiter: Optional[Any] = None,
@@ -726,7 +758,7 @@ class OllamaProvider(ModelProvider):
         cb = circuit_breaker or getattr(self, "circuit_breaker", None)
         def make_call():
             return self._with_retry(
-                lambda: self._complete_once(prompt, system_prompt, max_tokens)
+                lambda: self._complete_once(prompt, system_prompt, max_tokens, temperature, top_p)
             )
 
         try:
@@ -749,6 +781,8 @@ class OllamaProvider(ModelProvider):
                         prompt,
                         system_prompt,
                         max_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
                         agent_name=agent_name,
                         token_budget=token_budget,
                         rate_limiter=rate_limiter,
@@ -814,11 +848,13 @@ class OllamaProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: int,
+        temperature: float,
+        top_p: float,
     ) -> str:
         """Return one non-retried complete response from Ollama."""
         response = self._post_json(
             url=self._ollama_url(OLLAMA_GENERATE_PATH),
-            payload=self._ollama_payload(prompt, system_prompt, max_tokens, stream=False),
+            payload=self._ollama_payload(prompt, system_prompt, max_tokens, temperature, top_p, stream=False),
         )
         response_payload = response.json()
         return str(response_payload.get("response", ""))
@@ -844,7 +880,9 @@ class OllamaProvider(ModelProvider):
         prompt: str,
         system_prompt: str,
         max_tokens: Optional[int],
-        stream: bool,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        stream: bool = False,
     ) -> Dict[str, Any]:
         """Build an Ollama generation payload."""
         payload: Dict[str, Any] = {
@@ -853,8 +891,16 @@ class OllamaProvider(ModelProvider):
             "system": system_prompt,
             "stream": stream,
         }
+        options: Dict[str, Any] = {}
         if max_tokens is not None:
-            payload["options"] = {"num_predict": max_tokens}
+            options["num_predict"] = max_tokens
+        if temperature is not None:
+            options["temperature"] = temperature
+        if top_p is not None:
+            options["top_p"] = top_p
+            
+        if options:
+            payload["options"] = options
         return payload
 
     def _ollama_url(self, path: str) -> str:

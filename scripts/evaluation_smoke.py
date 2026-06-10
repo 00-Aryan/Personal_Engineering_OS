@@ -102,7 +102,9 @@ class MockJudgeProvider(ModelProvider):
         self,
         prompt: str,
         system_prompt: str,
-        max_tokens: int,
+        max_tokens: int = 1000,
+        *args: Any,
+        **kwargs: Any,
     ) -> str:
         """Return valid LLM-judge JSON for all code-writing criteria."""
         scores = {criterion.name: self.score for criterion in code_writing_criteria()}

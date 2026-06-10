@@ -71,6 +71,21 @@ Never start a task without reading all existing code first.
 - TASK_52: DONE (Launch Announcement Preparation)
 - TASK_53: DONE (Phase 8 Close — Final Release)
 
+## Phase 9 — Real-World Intelligence + Daily UX
+- TASK_54a: DONE (Project Context — Core Module + Tests - 410 tests green)
+- TASK_54b: DONE (Wire Project Context into BaseAgent + Redesign Agent Prompts - 410 tests green)
+- TASK_54c: DONE (Wire Project Context into ProjectOS + CLI Commands - 415 tests green)
+- TASK_55a: DONE (PreWriteValidator — Core Module + Tests - 424 tests green)
+- TASK_55b: DONE (Wire PreWriteValidator into CodeWritingAgent - 427 tests green)
+- TASK_55c: DONE (Token Budget Conservative Mode - 431 tests green)
+- TASK_56: DONE (Task Decomposer - 438 tests green)
+- TASK_57: DONE (Telegram Bot — Notifications + Status - 448 tests green)
+- TASK_58: DONE (Telegram Bot — Inbound Commands - 457 tests green)
+- TASK_59: DONE (Project Intake Agent + Phase Manager - 465 tests green)
+- TASK_60: DONE (Multi-Project Rotation + Daily UX - 474 tests green)
+- TASK_61: PENDING (Ollama Local Fallback + Model Parameter Tuning)
+- TASK_62: PENDING (README Overhaul + KNOWN_LIMITATIONS.md + FUTURE_SCOPE.md)
+
 
 ## Audit Protocol
 After every task, TASK_XX_RESULT.md must contain:

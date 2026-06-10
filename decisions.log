@@ -133,3 +133,58 @@
 [2026-06-08T00:08:00+00:00] [TASK_53] [DONE] [Completed final metrics compilation, updated package metadata to version 0.6.0, created capstone summary docs/PROJECT_SUMMARY.md, completed git tag v0.6.0 release, and executed all 4 verification smoke tests successfully]
 [projectos] ProjectOS stopped cleanly
 [projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[telegram_notifier] Error sending message: 400 Client Error: Bad Request for url: https://api.telegram.org/bot8823355086:AAFd8OOI5RpGs4aiVosy80QlGu-O6A8hWJM/sendMessage
+[telegram_notifier] Error sending message: 400 Client Error: Bad Request for url: https://api.telegram.org/bot8823355086:AAFd8OOI5RpGs4aiVosy80QlGu-O6A8hWJM/sendMessage
+[telegram_notifier] Error sending message: 400 Client Error: Bad Request for url: https://api.telegram.org/bot8823355086:AAFd8OOI5RpGs4aiVosy80QlGu-O6A8hWJM/sendMessage - Response: {"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Character '.' is reserved and must be escaped with the preceding '\\'"}
+[telegram_notifier] Error sending message: 400 Client Error: Bad Request for url: https://api.telegram.org/bot8823355086:AAFd8OOI5RpGs4aiVosy80QlGu-O6A8hWJM/sendMessage - Response: {"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Character '!' is reserved and must be escaped with the preceding '\\'"}
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[telegram_notifier] Error sending message: HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: /bot<redacted-bot-token>/sendMessage (Caused by NameResolutionError("HTTPSConnection(host='api.telegram.org', port=443): Failed to resolve 'api.telegram.org' ([Errno -2] Name or service not known)"))
+[telegram_notifier] Error sending message: HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: /bot<redacted-bot-token>/sendMessage (Caused by NameResolutionError("HTTPSConnection(host='api.telegram.org', port=443): Failed to resolve 'api.telegram.org' ([Errno -2] Name or service not known)"))
+[telegram_notifier] Error sending message: HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: /bot<redacted-bot-token>/sendMessage (Caused by NameResolutionError("HTTPSConnection(host='api.telegram.org', port=443): Failed to resolve 'api.telegram.org' ([Errno -2] Name or service not known)"))
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly
+[projectos] ProjectOS stopped cleanly

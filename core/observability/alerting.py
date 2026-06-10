@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.observability.token_budget import TokenBudget
 from core.observability.cost_tracker import CostTracker
+from core.notifications.telegram_notifier import TelegramNotifier
 
 import yaml
 
@@ -114,11 +115,13 @@ class AlertManager:
         state_dir: Path,
         rules: Optional[List[AlertRule]] = None,
         alerts_config: Optional[Dict[str, Any]] = None,
+        notifier: Optional[TelegramNotifier] = None,
     ) -> None:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self.state_dir / "alerts.jsonl"
         self._lock = threading.Lock()
+        self.notifier = notifier
         
         self.alerts_config = alerts_config or {}
         self.daily_cost_inr_threshold = float(self.alerts_config.get("daily_cost_inr_threshold", 100.0))
@@ -560,6 +563,12 @@ class AlertManager:
             self._last_fired_at[key] = now
             self._alerts.append(alert)
             self._append_alert(alert)
+            if self.notifier is not None:
+                self.notifier.send_alert(
+                    severity=alert.severity.value,
+                    message=alert.message,
+                    component=alert.component,
+                )
 
     def get_active_alerts(self) -> List[Alert]:
         """Return active unacknowledged alerts sorted by severity then timestamp."""

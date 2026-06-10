@@ -15,6 +15,7 @@ from typing import Any, List, Mapping, Optional, Sequence, TYPE_CHECKING
 from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
+from core.project_context import ProjectContextLoader
 
 if TYPE_CHECKING:
     from core.intelligence.collaboration import CollaborationBroker
@@ -40,17 +41,7 @@ DEFAULT_SLUG = "architecture-decision"
 MAX_SLUG_LENGTH = 80
 DECISIONS_LOG_NAME = "decisions.log"
 
-SYSTEM_PROMPT = (
-    "You are a principal systems architect with 15 years of experience.\n"
-    "You challenge design decisions before they are built.\n"
-    "For every architecture question, output JSON with:\n"
-    "decision_required (string),\n"
-    "risks (list of strings),\n"
-    "alternatives (list of {name, pros, cons}),\n"
-    "recommendation (string),\n"
-    "adr_content (full ADR markdown as string),\n"
-    "confidence (HIGH/MEDIUM/LOW)"
-)
+# Global SYSTEM_PROMPT removed (defined as class attribute instead)
 
 MODEL_MAX_TOKENS = 8192
 
@@ -165,6 +156,25 @@ def _append_atomically(path: Path, content: str) -> None:
 class ArchitectureAgent(BaseAgent):
     """Agent that answers architecture questions and writes ADR files."""
 
+    SYSTEM_PROMPT = """You are a principal systems architect with 15 years experience.
+Your role is to evaluate architectural decisions before they are built.
+
+ALWAYS:
+- Challenge assumptions in the proposal
+- Provide 2-3 concrete alternatives
+- State tradeoffs explicitly
+- Estimate implementation complexity honestly
+- Consider the project's specific constraints
+
+NEVER:
+- Recommend adding complexity without justification
+- Ignore existing patterns in the codebase
+- Recommend paid infrastructure if free alternatives exist
+
+Output: JSON with decision, risks, alternatives, recommendation.
+{project_context}"""
+
+
     def __init__(
         self,
         model_provider: ModelProvider,
@@ -172,6 +182,7 @@ class ArchitectureAgent(BaseAgent):
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
         memory_manager: Optional["MemoryManager"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
+        context_loader: Optional[ProjectContextLoader] = None,
     ) -> None:
         """Initialize ArchitectureAgent with model access and project paths."""
         super().__init__(
@@ -181,6 +192,7 @@ class ArchitectureAgent(BaseAgent):
             logger,
             memory_manager=memory_manager,
             collaboration_broker=collaboration_broker,
+            context_loader=context_loader,
         )
         self.project_root = Path(project_root)
 
@@ -194,10 +206,15 @@ class ArchitectureAgent(BaseAgent):
             return self._failure_result(event, DECISION_REASON_INVALID_PAYLOAD)
 
         prompt = self._build_prompt(event.payload, question.strip())
+        system_prompt = self.build_system_prompt(self.SYSTEM_PROMPT)
+        params = self.get_model_params()
         model_output = self.model_provider.complete(
             prompt,
-            SYSTEM_PROMPT,
-            MODEL_MAX_TOKENS,
+            system_prompt,
+            params["max_tokens"],
+            temperature=params["temperature"],
+            top_p=params["top_p"],
+            agent_name=self.name,
         )
         try:
             decision = self.parse_decision(model_output)

@@ -25,13 +25,13 @@ class TestProjectOSGracefulShutdown(unittest.TestCase):
                         "provider": "gemini",
                         "model": "gemini-1.5-flash",
                     }
-                    for agent_name in ["clone", "planning", "code_writing", "code_review", "architecture", "test", "docs"]
+                    for agent_name in ["clone", "planning", "code_writing", "code_review", "architecture", "test", "docs", "project_intake"]
                 }
             }
             mock_provider = Mock()
             init_provs_mock.return_value = {
                 agent_name: mock_provider
-                for agent_name in ["clone", "planning", "code_writing", "code_review", "architecture", "test", "docs"]
+                for agent_name in ["clone", "planning", "code_writing", "code_review", "architecture", "test", "docs", "project_intake"]
             }
             
             

@@ -12,6 +12,7 @@ from typing import Any, Iterable, List, Mapping, Optional, TYPE_CHECKING
 from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
+from core.project_context import ProjectContextLoader
 
 if TYPE_CHECKING:
     from core.intelligence.collaboration import CollaborationBroker
@@ -33,15 +34,7 @@ DECISIONS_LOG_NAME = "decisions.log"
 README_FILE_NAME = "README.md"
 MODEL_MAX_TOKENS = 8192
 
-SYSTEM_PROMPT = (
-    "You are a technical writer and senior engineer.\n"
-    "You update documentation to reflect code changes.\n"
-    "Rules:\n"
-    "- Never remove existing documentation\n"
-    "- Add docstrings to any function missing them\n"
-    "- Update README sections that reference changed code\n"
-    "- Output ONLY the updated file content, no explanation"
-)
+# Global SYSTEM_PROMPT removed (defined as class attribute instead)
 
 PAYLOAD_KEY_ADDED_DOCSTRINGS = "added_docstrings"
 PAYLOAD_KEY_FILE_PATH = "file_path"
@@ -123,6 +116,24 @@ def _append_atomically(path: Path, content: str) -> None:
 class DocsAgent(BaseAgent):
     """Agent that updates source docstrings and related README content."""
 
+    SYSTEM_PROMPT = """You are a technical writer and senior engineer.
+Your role is to keep documentation accurate and complete.
+
+ALWAYS:
+- Verify documentation matches actual code behavior
+- Add docstrings to functions missing them
+- Keep existing documentation that is still accurate
+- Use concrete examples in documentation
+
+NEVER:
+- Remove existing documentation
+- Document behavior that doesn't exist
+- Write vague documentation ("handles errors appropriately")
+- Output markdown — output valid Python with docstrings only
+
+{project_context}"""
+
+
     def __init__(
         self,
         model_provider: ModelProvider,
@@ -130,6 +141,7 @@ class DocsAgent(BaseAgent):
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
         memory_manager: Optional["MemoryManager"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
+        context_loader: Optional[ProjectContextLoader] = None,
     ) -> None:
         """Initialize DocsAgent with model access and project paths."""
         super().__init__(
@@ -139,6 +151,7 @@ class DocsAgent(BaseAgent):
             logger,
             memory_manager=memory_manager,
             collaboration_broker=collaboration_broker,
+            context_loader=context_loader,
         )
         self.project_root = Path(project_root)
 
@@ -163,10 +176,14 @@ class DocsAgent(BaseAgent):
         missing_before = self._missing_docstring_functions(original_source)
         existing_docstrings = self._existing_docstrings(original_source)
         prompt = self._build_source_prompt(event.payload, source_path, original_source, missing_before)
+        params = self.get_model_params()
         model_output = self.model_provider.complete(
             prompt,
-            SYSTEM_PROMPT,
-            MODEL_MAX_TOKENS,
+            self.build_system_prompt(self.SYSTEM_PROMPT),
+            params["max_tokens"],
+            temperature=params["temperature"],
+            top_p=params["top_p"],
+            agent_name=self.name,
         )
         updated_source = self._normalize_model_content(model_output)
         if not self._preserves_existing_docstrings(updated_source, existing_docstrings):
@@ -294,10 +311,14 @@ class DocsAgent(BaseAgent):
         if not readme_path.exists():
             return False
         original_readme = readme_path.read_text(encoding=ENCODING)
+        params = self.get_model_params()
         updated_readme = self.model_provider.complete(
             self._build_readme_prompt(source_path, original_readme, readme_sections),
-            SYSTEM_PROMPT,
-            MODEL_MAX_TOKENS,
+            self.build_system_prompt(self.SYSTEM_PROMPT),
+            params["max_tokens"],
+            temperature=params["temperature"],
+            top_p=params["top_p"],
+            agent_name=self.name,
         ).strip()
         if original_readme not in updated_readme:
             updated_readme = f"{original_readme.rstrip()}{NEWLINE}{NEWLINE}{updated_readme}"

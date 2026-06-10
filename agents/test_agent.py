@@ -13,6 +13,7 @@ from typing import Any, Mapping, Optional, TYPE_CHECKING
 from core.base_agent import BaseAgent
 from core.events import AgentEvent, AgentResult, EventType
 from core.model_provider import ModelProvider
+from core.project_context import ProjectContextLoader
 
 if TYPE_CHECKING:
     from core.intelligence.collaboration import CollaborationBroker
@@ -35,16 +36,7 @@ TESTS_DIR_NAME = "tests"
 TEST_FILE_PREFIX = "test_"
 MODEL_MAX_TOKENS = 8192
 
-SYSTEM_PROMPT = (
-    "You are a senior QA engineer and Python testing expert.\n"
-    "You write comprehensive pytest unit tests.\n"
-    "Rules:\n"
-    "- Every test has a clear docstring explaining what it tests\n"
-    "- Use pytest fixtures, not unittest\n"
-    "- Mock all external calls (HTTP, file system where appropriate)\n"
-    "- Test both happy path and failure cases\n"
-    "- Output ONLY valid Python test code, no markdown"
-)
+# Global SYSTEM_PROMPT removed (defined as class attribute instead)
 
 PAYLOAD_KEY_FAILED = "failed"
 PAYLOAD_KEY_FILE_PATH = "file_path"
@@ -131,6 +123,26 @@ class TestAgent(BaseAgent):
 
     __test__ = False
 
+    SYSTEM_PROMPT = """You are a senior QA engineer.
+Your role is to write comprehensive pytest tests.
+
+ALWAYS:
+- Write tests for both happy path and failure cases
+- Mock all external calls (HTTP, file system, APIs)
+- Use descriptive test names: test_[function]_[scenario]_[expected]
+- Add docstrings to every test
+- Keep each test focused on one behavior
+
+NEVER:
+- Write tests that make real API calls
+- Write tests that depend on other tests
+- Write tests that modify shared state
+- Output anything except valid pytest code
+
+Output: Raw Python pytest code only. No explanation. No fences.
+{project_context}"""
+
+
     def __init__(
         self,
         model_provider: ModelProvider,
@@ -138,6 +150,7 @@ class TestAgent(BaseAgent):
         project_root: Path | str = DEFAULT_PROJECT_ROOT,
         memory_manager: Optional["MemoryManager"] = None,
         collaboration_broker: Optional["CollaborationBroker"] = None,
+        context_loader: Optional[ProjectContextLoader] = None,
     ) -> None:
         """Initialize TestAgent with model access and project paths."""
         super().__init__(
@@ -147,6 +160,7 @@ class TestAgent(BaseAgent):
             logger,
             memory_manager=memory_manager,
             collaboration_broker=collaboration_broker,
+            context_loader=context_loader,
         )
         self.project_root = Path(project_root)
 
@@ -167,10 +181,14 @@ class TestAgent(BaseAgent):
         source_code = source_path.read_text(encoding=ENCODING)
         existing_tests = self._existing_tests(test_path)
         prompt = self._build_prompt(event.payload, source_path, source_code, existing_tests)
+        params = self.get_model_params()
         generated_tests = self.model_provider.complete(
-            prompt,
-            SYSTEM_PROMPT,
-            MODEL_MAX_TOKENS,
+            prompt=prompt,
+            system_prompt=self.build_system_prompt(self.SYSTEM_PROMPT),
+            temperature=params["temperature"],
+            max_tokens=params["max_tokens"],
+            top_p=params["top_p"],
+            agent_name=self.name,
         )
         generated_tests_normalized = self._normalized_tests(generated_tests)
         _write_atomically(test_path, generated_tests_normalized)

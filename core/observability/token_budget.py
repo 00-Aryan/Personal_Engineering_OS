@@ -444,3 +444,37 @@ class TokenBudget:
         if len(first_part) // 4 > budget_remaining:
             return first_part[: budget_remaining * 4]
         return first_part
+
+    def get_budget(self, agent_name: str) -> Dict[str, int]:
+        """Return a budget dictionary containing soft, hard, and daily limits for the agent."""
+        budget = self.budgets.get(agent_name, self.budgets.get("default", {}))
+        return {
+            "soft": budget.get("soft_limit_per_call", 2000),
+            "hard": budget.get("hard_limit_per_call", 4000),
+            "daily": budget.get("daily_limit", 50000),
+        }
+
+    def check_daily_threshold_alert(
+        self,
+        agent_name: str,
+        threshold_pct: float = 0.60,
+    ) -> Optional[str]:
+        """
+        Return a warning string if agent has used >= threshold_pct of its
+        daily budget, otherwise return None.
+        """
+        usage = self.get_daily_usage(agent_name)
+        budget = self.get_budget(agent_name).get("daily", 0)
+        if budget == 0:
+            return None
+        pct = usage / budget
+        if pct >= threshold_pct:
+            return (
+                f"⚠️ Token alert: {agent_name} used {pct:.0%} of daily budget. "
+                f"Running in conservative mode (reduced context, shorter outputs)."
+            )
+        return None
+
+    def conservative_mode_active(self, agent_name: str) -> bool:
+        """Return True if agent is at or above 60% daily budget usage."""
+        return self.check_daily_threshold_alert(agent_name) is not None

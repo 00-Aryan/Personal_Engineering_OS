@@ -22,11 +22,14 @@ core/fallback_router.py
 core/git_manager.py
 core/model_provider.py
 core/persistence.py
+core/pre_write_validator.py
 core/project_config.py
+core/project_context.py
 core/projectos.py
 core/provider_health.py
 core/retry.py
 core/safety.py
+core/task_decomposer.py
 core/task_queue.py
 core/template_manager.py
 core/trigger_system.py
@@ -109,6 +112,8 @@ tests/test_open_source_hygiene.py
 tests/test_persistence.py
 tests/test_planning_agent.py
 tests/test_plugin_packaging.py
+tests/test_pre_write_validator.py
+tests/test_project_context.py
 tests/test_project_registry.py
 tests/test_projectos.py
 tests/test_provider_health.py
@@ -118,6 +123,7 @@ tests/test_real_api_smoke.py
 tests/test_repository_hygiene.py
 tests/test_retry.py
 tests/test_safety.py
+tests/test_task_decomposer.py
 tests/test_task_queue.py
 tests/test_template_manager.py
 tests/test_test_agent.py

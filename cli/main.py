@@ -214,6 +214,11 @@ COLLAB_LOG_TEMPLATE = (
     "{duration_ms} ms\nQ: {question}\nA: {answer}"
 )
 COLLAB_EMPTY_MESSAGE = "No collaboration consultations found."
+CONTEXT_NO_FILE_FOUND = "No project context found."
+CONTEXT_PARSE_ERROR = "Context file found but could not be parsed."
+CONTEXT_TEMPLATE_CREATED = "Created project_description.md — fill in the sections and re-run."
+CONTEXT_FILE_EXISTS = "project_description.md already exists."
+CONTEXT_TEMPLATE_FILENAME = "project_description.md"
 
 
 class EmptyAgentRegistry:
@@ -472,6 +477,66 @@ def projects_remove(project_name: str) -> None:
     registry = ProjectRegistry()
     registry.remove_project(project_name)
     click.echo(PROJECT_REMOVED_TEMPLATE.format(project_name=project_name))
+
+
+@cli.command(name="brief")
+@click.pass_context
+def brief(ctx: click.Context) -> None:
+    """Generate and send morning brief immediately."""
+    from core.notifications.telegram_notifier import TelegramNotifier
+    from core.notifications.brief_generator import BriefGenerator
+    from core.project_config import ProjectRegistry
+    
+    project_root = _project_root(ctx)
+    config = _load_config(project_root)
+    
+    notifier = TelegramNotifier.from_env(project_root=project_root)
+    
+    state_dir = project_root / ".projectos_state"
+    if "project" in config and isinstance(config["project"], dict):
+        state_dir_name = config["project"].get("state_dir", ".projectos_state")
+        state_dir = project_root / state_dir_name
+        
+    registry = ProjectRegistry()
+    project_configs = registry.list_projects()
+    project_roots = [c.root_path for c in project_configs]
+    if not project_roots:
+        project_roots = [project_root]
+        
+    generator = BriefGenerator(notifier, state_dir, project_roots)
+    click.echo("Generating morning brief...")
+    brief_text = generator.generate_morning_brief()
+    click.echo("Morning brief sent and written to morning_brief.md")
+
+
+@cli.command(name="digest")
+@click.pass_context
+def digest(ctx: click.Context) -> None:
+    """Generate and send evening digest immediately."""
+    from core.notifications.telegram_notifier import TelegramNotifier
+    from core.notifications.brief_generator import BriefGenerator
+    from core.project_config import ProjectRegistry
+    
+    project_root = _project_root(ctx)
+    config = _load_config(project_root)
+    
+    notifier = TelegramNotifier.from_env(project_root=project_root)
+    
+    state_dir = project_root / ".projectos_state"
+    if "project" in config and isinstance(config["project"], dict):
+        state_dir_name = config["project"].get("state_dir", ".projectos_state")
+        state_dir = project_root / state_dir_name
+        
+    registry = ProjectRegistry()
+    project_configs = registry.list_projects()
+    project_roots = [c.root_path for c in project_configs]
+    if not project_roots:
+        project_roots = [project_root]
+        
+    generator = BriefGenerator(notifier, state_dir, project_roots)
+    click.echo("Generating evening digest...")
+    digest_text = generator.generate_evening_digest()
+    click.echo("Evening digest sent and written to evening_digest.md")
 
 
 @cli.command(name="git-log")
@@ -1224,9 +1289,33 @@ def _dashboard(project_os: ProjectOS) -> Dashboard:
     )
 
 
+def _get_project_phase_status(config: ProjectConfig) -> str:
+    """Return the current phase status of the project."""
+    if not config.enabled:
+        return "disabled"
+    state_file = config.state_dir / config.name / "phase_state.yaml"
+    if not state_file.exists():
+        state_file = config.state_dir / "phase_state.yaml"
+    if not state_file.exists():
+        return "No phases initialized"
+    try:
+        import yaml
+        with open(state_file, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if isinstance(data, list) and data:
+            for p in data:
+                status = p.get("status")
+                if status != "complete":
+                    return f"Phase {p.get('phase_number')}: {p.get('phase_name')} ({status})"
+            return "All phases completed"
+    except Exception:
+        pass
+    return "Unknown"
+
+
 def _project_row(project_config: ProjectConfig) -> str:
     """Return one formatted projects list row."""
-    status = PROJECT_STATUS_ENABLED if project_config.enabled else MISSING_VALUE
+    status = _get_project_phase_status(project_config)
     return " | ".join(
         [
             project_config.name,
@@ -2140,6 +2229,55 @@ def template_detect(ctx: click.Context) -> None:
         click.echo(f"Detected project type: {detected}")
     else:
         click.echo("Unknown project type")
+
+
+@cli.group(name="context")
+def context_group() -> None:
+    """Manage project context."""
+    pass
+
+
+@context_group.command(name="show")
+@click.pass_context
+def context_show(ctx: click.Context) -> None:
+    """Show the formatted project context injection string."""
+    from core.project_context import ProjectContextLoader
+    project_root = Path.cwd()
+    candidates = ["project_description.md", "project_context.md", ".projectos/context.md"]
+    has_file = any((project_root / c).is_file() for c in candidates)
+    if not has_file:
+        click.echo(CONTEXT_NO_FILE_FOUND)
+        return
+
+    loader = ProjectContextLoader(project_root)
+    context = None
+    try:
+        context = loader.load()
+    except Exception:
+        pass
+
+    if context is None:
+        click.echo(CONTEXT_PARSE_ERROR)
+    else:
+        click.echo(ProjectContextLoader.to_system_prompt_injection(context))
+
+
+@context_group.command(name="init")
+@click.pass_context
+def context_init(ctx: click.Context) -> None:
+    """Initialize project context with a project_description.md template."""
+    from core.project_context import ProjectContextLoader
+    output_path = Path.cwd() / CONTEXT_TEMPLATE_FILENAME
+    if output_path.exists():
+        click.echo(CONTEXT_FILE_EXISTS)
+        return
+
+    loader = ProjectContextLoader(Path.cwd())
+    try:
+        loader.create_template(output_path)
+        click.echo(CONTEXT_TEMPLATE_CREATED)
+    except Exception as e:
+        raise click.ClickException(f"Failed to create template: {e}")
 
 
 if __name__ == "__main__":
