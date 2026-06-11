@@ -1,6 +1,6 @@
-# ProjectOS — Personal Engineering OS
+# ProjectOS
 
-An autonomous background agent coordinator that reviews code, writes tests, updates documentation, and manages your backlog in real-time.
+Autonomous multi-agent system that manages your software projects while you focus on other work.
 
 [![CI Status](https://github.com/00-Aryan/Personal_Engineering_OS/actions/workflows/ci.yml/badge.svg)](https://github.com/00-Aryan/Personal_Engineering_OS/actions)
 [![Version](https://img.shields.io/github/v/release/00-Aryan/Personal_Engineering_OS?label=version)](https://github.com/00-Aryan/Personal_Engineering_OS/releases)
@@ -8,115 +8,150 @@ An autonomous background agent coordinator that reviews code, writes tests, upda
 
 ## What It Does
 
-ProjectOS is an autonomous agent coordinator that works silently in your local environment. It connects to your repository and orchestrates a roster of specialized agents to maintain codebase health. While you write code, ProjectOS continuously runs security audits, reviews changes, verifies test suites, updates documentation, and organizes backlog features without interrupting your focus.
+ProjectOS handles the lifecycle of software tasks. You create a backlog of features by editing a `project_description.md` file in your repository. The coordinator analyzes your requests, plans the execution steps, and dispatches tasks to specialized agents. The system works autonomously in the background, making code changes, writing tests, and updating project documentation.
 
-By running entirely on your local machine, the system maintains strict privacy standards. It connects to your choice of local or cloud AI models, managing request budgets and circuit breakers automatically to keep resources optimized. Instead of managing individual assistant prompts, ProjectOS gives you an integrated multi-agent engineering team that aligns itself with your repository's unique workflow.
-
-## Demo
-
-When you start ProjectOS, it begins monitoring your repository and launches a rich terminal dashboard:
-
-```text
-┌────────────────────────────────────────────────────────────────────────┐
-│ ProjectOS Daemon - Active Monitoring                                   │
-├────────────────────────────────────────────────────────────────────────┤
-│ Active Project: my-project [./]                                        │
-│ Status: Active                                                         │
-│                                                                        │
-│ Running Agents:                                                        │
-│  ● code_review  - Analyzing main.py (Gate passed: 0.82)                │
-│  ● test         - Generating suite for utils.py (8 passed)             │
-│  ○ docs         - Idle                                                 │
-│                                                                        │
-│ Recent Activity:                                                       │
-│  [04:02:10] EVENT: File changed (main.py)                              │
-│  [04:02:12] ROUTE: Routed change to review agent                       │
-│  [04:02:25] AUDIT: Quality score 0.82 matches gate criteria            │
-│  [04:02:28] WRITE: Updated documentation in README.md                  │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-## Quick Start
-
-```bash
-git clone https://github.com/00-Aryan/Personal_Engineering_OS
-cd Personal_Engineering_OS
-python install.py
-```
-
-That's it. The installer handles dependencies, configuration, and
-provider setup interactively.
-
-### Manual Setup
-For advanced configuration, see [docs/CONTRIBUTING.md].
+You stay in control without leaving your workflow. Important updates, code modifications, or planned operations are buffered and sent to your Telegram chat. You can review proposals, approve next steps, or request revisions on the fly. Because the system runs entirely on your local machine, your source files and keys remain private.
 
 ## How It Works
 
-ProjectOS routes repository events through a semantic router to dispatch task payloads to specialized agent & assistant personas.
-
 ```text
-                [Repository Events]
-                         │
-                         ▼
-                 [Semantic Router]
-                         │
-        ┌────────┬───────┼────────┬────────┐
-        ▼        ▼       ▼        ▼        ▼
-     [Clone] [Planner] [Writer] [Reviewer] [Tester]
+  [project_description.md]
+              │
+              ▼
+    [Morning Telegram Brief] ──(You Approve/Instruct)──┐
+              ▲                                        │
+              │                                        ▼
+    [Evening Telegram Digest] ◄──(Agents Execute)──────┘
 ```
 
-- **Clone**: The supervisor and event coordinator that routes change events to specific agents.
-- **Planning**: Translates feature requirements and backlog tasks into execution steps.
-- **Code Writing**: Implements changes and feature requirements in your workspace.
-- **Code Review**: Analyzes code modifications for quality, security, and styling errors.
-- **Architecture**: Evaluates system design, answers queries, and records decisions.
-- **Test**: Creates and verifies unit test suites for modified components.
-- **Docs**: Synchronizes and updates repository documentation when features change.
+The system cycles through a daily workflow:
+1. **Morning Telegram Brief**: Summarizes pending plans, blocked items, and requests your approval.
+2. **User Instructions**: You approve tasks or provide text feedback directly inside the chat.
+3. **Agent Loop**: The orchestrator wakes up, coordinates agents to modify files, and runs tests.
+4. **Evening Telegram Digest**: Sends a summary of completed tasks and the updated status of your project.
 
-## Agent Roster
+## Quick Start
 
-| Agent | Responsibility | When It Runs |
-| --- | --- | --- |
-| `clone` | Coordinates tasks and routes workspace events | On any repository file change |
-| `planning` | Translates user prompts into backlog items | When a new feature is requested |
-| `code_writing` | Implements changes based on planned backlog tasks | When a task is approved for writing |
-| `code_review` | Reviews files and outputs detailed quality reports | On file modification events |
-| `architecture` | Answers design questions and documents architecture decisions | On architecture inquiries |
-| `test` | Writes and executes unit testing suites | After code writing is completed |
-| `docs` | Updates inline comments and external project guides | After a successful code review |
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/00-Aryan/Personal_Engineering_OS
+   cd Personal_Engineering_OS
+   ```
 
-## Use as AGY/Codex Plugin
+2. **Install dependencies:**
+   ```bash
+   python install.py
+   ```
 
-ProjectOS integrates natively with AGY and Codex CLI.
+3. **Configure API credentials:**
+   Add your model provider API key to the generated `.env` file:
+   ```bash
+   echo "GEMINI_API_KEY=your_api_key_here" >> .env
+   ```
 
-**AGY:**
-```bash
-agy plugin install dist/projectos-plugin-v0.4.0.tar.gz
-```
-Then in any AGY session: use $projectos-plan, $projectos-review
+4. **Start the daemon:**
+   ```bash
+   uv run projectos run --dashboard
+   ```
 
-**Codex:**
-```bash
-codex plugin install dist/projectos-plugin-v0.4.0.tar.gz
-```
+## Daily Workflow
 
-**MCP Server (any client):**
-```bash
-uv run --no-sync python -m mcp_server.server
-```
+Your interaction with the system happens primarily via Telegram. When the daemon is active, it messages you every morning with status updates and awaits your confirmation before modifying code.
 
-## Swap A Model
+Here is an example morning brief:
+```text
+🌅 ProjectOS Morning Brief
 
-Swap agent model assignments using the CLI:
+Active Project: my-web-api
+📋 Pending your approval: 2
+🔒 Blocked tasks: 0
 
-```bash
-uv run projectos model planning deepseek-v3
+Use /status for full details.
 ```
 
-This modifies `config/projectos.yaml` to dynamically redirect agent requests to the new provider or model.
+### Telegram Commands
+You can control the background daemon by sending these commands in the chat:
+- `/status` — View current system status and model assignments.
+- `/approve <id>` — Approve a pending task plan for execution.
+- `/reject <id>` — Reject a proposed task plan.
+- `/brief` — Manually trigger the morning project update.
+- `/digest` — Request the evening summary of completed work.
+- `/pause` — Suspend background file monitoring and execution.
+- `/resume` — Resume background file monitoring.
 
-## Known Limitations
+## Agents
 
-- **Local Scope**: Runs entirely in your local terminal process.
-- **Review Dependency**: Automatic writes require human approval and local key validation.
-- **Python Native**: Core tools are optimized for Python structures.
+| Agent | Role | What it produces |
+| :--- | :--- | :--- |
+| `clone` | Workspace coordinator | Event routing and task scheduling |
+| `planning` | Backlog engineer | Actionable task lists from prompts |
+| `code_writing` | Software developer | Source file changes and features |
+| `code_review` | Quality reviewer | Code reviews and security audits |
+| `architecture` | Systems designer | Architecture records (ADRs) |
+| `test` | Verification engineer | Unit tests and execution verification |
+| `docs` | Technical writer | Markdown guides and documentation |
+
+## Project Templates
+
+| Template | Best for | Key differences |
+| :--- | :--- | :--- |
+| `ds_project` | Data Science & ML | Pre-configured for data scripts, notebooks, and models |
+| `rag_pipeline` | Retrieval AI | Includes vector indexers and LLM context chains |
+| `web_api` | Backend APIs | Ready for FastAPI and backend route validation |
+| `cli_tool` | CLI Applications | Formatted for click subcommands and terminal utilities |
+
+## Configuration
+
+Set environment variables in `.env`:
+- `GEMINI_API_KEY` or `OPENROUTER_API_KEY` for cloud models.
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for chat integration.
+
+Adjust orchestration options in `config/projectos.yaml`:
+```yaml
+rate_limit:
+  requests_per_minute: 60
+token_budget:
+  daily_max_usd: 5.0
+```
+
+For advanced settings, refer to the [docs/CONTRIBUTING.md](file:///home/aryan/June-2026/Personal_Engineering%20_OS/docs/CONTRIBUTING.md) guide.
+
+## CLI Reference
+
+| Command | Description |
+| :--- | :--- |
+| `uv run projectos status` | Show current provider health and agent assignments |
+| `uv run projectos run` | Start the local orchestrator and monitor files |
+| `uv run projectos model <agent> <model>` | Update the model used by a specific agent |
+| `uv run projectos approve` | Interactively approve pending backlog tasks |
+| `uv run projectos backlog` | Display the backlog tasks with priority colors |
+
+## Honest Limitations
+
+ProjectOS has several design boundaries:
+- **No secure sandbox**: Generated code and tests run directly on the host machine.
+- **Mocked test validation**: The automated test suite uses mocks and does not evaluate real LLM output quality.
+- **No data rotation**: Traces and JSONL log files grow indefinitely.
+- **Single-machine design**: Project state is saved locally and cannot be synchronized across multiple hosts.
+- **No web interface**: Interactivity is limited to the terminal and Telegram commands.
+- **Provider limits**: Using free tiers of cloud APIs may result in rate-limit throttling.
+
+For details, view [KNOWN_LIMITATIONS.md](file:///home/aryan/June-2026/Personal_Engineering%20_OS/KNOWN_LIMITATIONS.md).
+
+## What's Coming Next
+
+The following additions are planned (not built yet):
+- 🔜 **Isolated Docker runner** for executing tests inside containers.
+- 🔜 **Multi-project web interface** for status monitoring.
+- 🔜 **GitHub App integration** to review pull requests.
+- **VS Code extension** to view agent feedback inside the editor.
+
+For details, view [FUTURE_SCOPE.md](file:///home/aryan/June-2026/Personal_Engineering%20_OS/FUTURE_SCOPE.md).
+
+## Contributing
+
+We welcome contributions to improve the system. Please read our [CONTRIBUTING.md](file:///home/aryan/June-2026/Personal_Engineering%20_OS/docs/CONTRIBUTING.md) file to understand the development standards and PR submission process.
+
+## License
+
+[MIT License](file:///home/aryan/June-2026/Personal_Engineering%20_OS/LICENSE)

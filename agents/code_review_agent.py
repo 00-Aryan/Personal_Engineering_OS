@@ -297,7 +297,7 @@ Output: JSON array only. Empty array if no issues.
 
             params = self.get_model_params()
             original_max_context_tokens = None
-            if self.token_budget and self.token_budget.conservative_mode_active(self.name):
+            if self.is_conservative_mode_active():
                 self.logger.info(f"Conservative mode active for {self.name}")
                 if self.context_retriever:
                     original_max_context_tokens = self.context_retriever.max_context_tokens

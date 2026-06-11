@@ -40,6 +40,7 @@ def test_temperature_passed_to_provider(tmp_path):
             "task_id": "T1",
             "file_path": "test.py",
             "task_description": "write helper",
+            "acceptance_criteria": "helper compiles and works",
         }
     )
     agent.handle(event)

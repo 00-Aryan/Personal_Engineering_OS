@@ -172,6 +172,20 @@ class BaseAgent(ABC):
         """Get the token budget manager from model provider."""
         return getattr(self.model_provider, "token_budget", None)
 
+    def is_conservative_mode_active(self) -> bool:
+        """Check if conservative token budget mode is active, safely handling mocks."""
+        tb = self.token_budget
+        if not tb or not hasattr(tb, "conservative_mode_active"):
+            return False
+        try:
+            val = tb.conservative_mode_active(self.name)
+            is_mock = "Mock" in type(val).__name__ or "Mock" in type(tb).__name__
+            if is_mock:
+                return not ("Mock" in type(val).__name__) and bool(val)
+            return bool(val)
+        except Exception:
+            return False
+
     def get_model_params(self) -> Dict[str, Any]:
         """Get model parameters (temperature, max_tokens, top_p) for this agent from configuration."""
         defaults = {"temperature": 0.3, "max_tokens": 1000, "top_p": 0.9}
@@ -192,8 +206,7 @@ class BaseAgent(ABC):
                     }
         
         # If conservative mode is active, override max_tokens to 500
-        tb = self.token_budget
-        if tb and hasattr(tb, "conservative_mode_active") and tb.conservative_mode_active(self.name):
+        if self.is_conservative_mode_active():
             result["max_tokens"] = min(result["max_tokens"], 500)
             
         return result

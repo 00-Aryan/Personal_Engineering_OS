@@ -27,7 +27,7 @@ def test_readme_has_agent_roster_section() -> None:
     readme_path = Path("README.md")
     assert readme_path.exists()
     content = readme_path.read_text(encoding="utf-8")
-    assert "## Agent Roster" in content
+    assert "## Agent Roster" in content or "## Agents" in content
 
 
 def test_faq_has_eight_questions() -> None:
@@ -64,3 +64,76 @@ def test_pr_template_exists() -> None:
     assert pr_path.exists()
     content = pr_path.read_text(encoding="utf-8")
     assert "## Checklist" in content
+
+
+def test_readme_under_700_words_body() -> None:
+    """Verify README.md body text is under 700 words (headings, tables, and code blocks excluded)."""
+    readme_path = Path("README.md")
+    assert readme_path.exists()
+    content = readme_path.read_text(encoding="utf-8")
+    
+    # Strip code blocks
+    content_no_code = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+    
+    # Process line by line
+    body_lines = []
+    for line in content_no_code.splitlines():
+        stripped = line.strip()
+        # Exclude headers
+        if stripped.startswith("#"):
+            continue
+        # Exclude table rows (lines starting/ending with | or having | in them like separator lines)
+        if stripped.startswith("|") or (stripped.startswith(":") and "|" in stripped) or (stripped.startswith("-") and "|" in stripped):
+            continue
+        # Also exclude badge lines or links that are purely links (like [![CI Status]...)
+        if re.match(r"^\[\!\[", stripped) or re.match(r"^\[", stripped):
+            continue
+        body_lines.append(stripped)
+        
+    body_text = " ".join(body_lines)
+    # Strip HTML comments
+    body_text = re.sub(r"<!--.*?-->", "", body_text, flags=re.DOTALL)
+    # Strip standard markdown links formatting [text](url) -> text
+    body_text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", body_text)
+    
+    words = [w for w in re.split(r"\s+", body_text) if w]
+    word_count = len(words)
+    assert word_count <= 700, f"README has {word_count} body words, which exceeds the 700-word limit."
+
+
+def test_known_limitations_file_exists() -> None:
+    """Verify KNOWN_LIMITATIONS.md exists in the root directory."""
+    path = Path("KNOWN_LIMITATIONS.md")
+    assert path.exists()
+
+
+def test_future_scope_file_exists() -> None:
+    """Verify FUTURE_SCOPE.md exists in the root directory."""
+    path = Path("FUTURE_SCOPE.md")
+    assert path.exists()
+
+
+def test_readme_has_honest_limitations_section() -> None:
+    """Verify README.md contains an Honest Limitations section."""
+    readme_path = Path("README.md")
+    assert readme_path.exists()
+    content = readme_path.read_text(encoding="utf-8")
+    assert "## Honest Limitations" in content
+
+
+def test_readme_does_not_mention_internal_build_process() -> None:
+    """Verify README.md does not contain references to tasks, phases, AGY, or Codex."""
+    readme_path = Path("README.md")
+    assert readme_path.exists()
+    content = readme_path.read_text(encoding="utf-8")
+    forbidden = ["task_", "phase ", "internal build", "agy", "codex"]
+    for word in forbidden:
+        assert word not in content.lower(), f"README contains forbidden term: {word}"
+
+
+def test_readme_has_telegram_commands_section() -> None:
+    """Verify README.md contains a Telegram Commands section."""
+    readme_path = Path("README.md")
+    assert readme_path.exists()
+    content = readme_path.read_text(encoding="utf-8")
+    assert "Telegram Commands" in content

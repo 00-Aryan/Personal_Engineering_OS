@@ -83,8 +83,8 @@ Never start a task without reading all existing code first.
 - TASK_58: DONE (Telegram Bot — Inbound Commands - 457 tests green)
 - TASK_59: DONE (Project Intake Agent + Phase Manager - 465 tests green)
 - TASK_60: DONE (Multi-Project Rotation + Daily UX - 474 tests green)
-- TASK_61: PENDING (Ollama Local Fallback + Model Parameter Tuning)
-- TASK_62: PENDING (README Overhaul + KNOWN_LIMITATIONS.md + FUTURE_SCOPE.md)
+- TASK_61: DONE (Ollama Local Fallback + Model Parameter Tuning - 479 tests green)
+- TASK_62: DONE (README Overhaul + KNOWN_LIMITATIONS.md + FUTURE_SCOPE.md - 485 tests green)
 
 
 ## Audit Protocol
