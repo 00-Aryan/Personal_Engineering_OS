@@ -10,3 +10,22 @@ dist/
 .projectos_state/real_api_smoke_results.json
 
 # Task management (internal)
+
+# Local AGY/task execution artifacts
+tasks/TASK_*.md
+tasks/TASK_*_RESULT.md
+tasks/REAL_RUN_*.md
+tasks/REAL_RUN_*.txt
+tasks/debug/
+
+# Keep task registry files if needed
+!tasks/README.md
+!tasks/PHASES.md
+
+# Local runtime logs/state
+decisions.log
+decisions.jsonl
+*.log
+
+# Generated runtime reports
+docs/performance_report.md
