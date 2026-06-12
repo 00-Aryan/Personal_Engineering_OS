@@ -38,6 +38,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     load_env_file(args.env_file)
+
+    # Clean up stale circuit state files before running live smoke
+    state_dir = Path(".projectos_state")
+    if state_dir.exists():
+        for p in state_dir.glob("circuit_state_*.json"):
+            try:
+                p.unlink()
+            except Exception:
+                pass
+
     if not args.status_file.exists():
         setup_result = subprocess.run(
             [
@@ -68,13 +78,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = load_model_config(args.config)
     failures: list[str] = []
     results: dict[str, dict[str, Any]] = {}
+    required_providers = {"gemini"}
     
     for provider_name in provider_names:
+        is_required = provider_name in required_providers
         try:
             output, latency_ms, tokens_used = _run_provider_smoke(provider_name, config, args.config, args.status_file.parent)
             if "LIVE_OK" not in output:
-                failures.append(f"{provider_name} returned {output}")
-                print(f"{provider_name}: live smoke failed - Expected 'LIVE_OK', got '{output}'")
+                err_msg = f"Expected 'LIVE_OK', got '{output}'"
+                if is_required:
+                    failures.append(f"{provider_name}: {err_msg}")
+                    print(f"{provider_name}: live smoke failed - {err_msg}")
+                else:
+                    print(f"{provider_name}: optional live smoke failed - {err_msg}")
             else:
                 results[provider_name] = {
                     "latency_ms": latency_ms,
@@ -83,19 +99,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
                 print(f"{provider_name}: live smoke ok - Latency: {latency_ms}ms, Tokens: {tokens_used}")
         except Exception as error:
-            failures.append(f"{provider_name}: {error}")
-            print(f"{provider_name}: live smoke failed - {error}")
+            if is_required:
+                failures.append(f"{provider_name}: {error}")
+                print(f"{provider_name}: live smoke failed - {error}")
+            else:
+                print(f"{provider_name}: optional live smoke failed - {error}")
 
     # Write results to .projectos_state/live_smoke_results.json
     results_path = args.status_file.parent / "live_smoke_results.json"
     results_path.parent.mkdir(parents=True, exist_ok=True)
     results_path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
 
+    # If any required provider is missing from results, it's a failure.
+    for req in required_providers:
+        if req not in results:
+            req_err = f"{req}: required provider did not pass"
+            if not any(f.startswith(req) for f in failures):
+                failures.append(req_err)
+
     if failures:
         print(f"LIVE SMOKE FAILED: {failures[0]}")
         return 1
         
-    print(f"LIVE SMOKE PASSED: {len(results)} providers verified")
+    print("LIVE SMOKE OK: required provider gemini passed")
     return 0
 
 

@@ -178,7 +178,7 @@ class ProjectOS:
     ) -> None:
         """Load configuration and initialize ProjectOS runtime components."""
         self.config_path = Path(config_path)
-        
+
         is_new_config = False
         master_config = None
         if self.config_path.exists():
@@ -196,7 +196,7 @@ class ProjectOS:
             if not env_file.exists():
                 env_file = Path(".env")
             master_config = MasterProjectConfig.load(self.config_path, env_file=env_file)
-            
+
             self.project_root = Path(project_root).resolve() if project_root is not None else master_config.project_root
             self.project_name = project_name or master_config.project_name
             self.state_dir = Path(state_dir).resolve() if state_dir is not None else master_config.state_dir
@@ -349,7 +349,7 @@ class ProjectOS:
                 req_static = gate.get("require_static", default_policy.require_static_analysis if default_policy else False)
                 block_sec = gate.get("block_security_high", default_policy.block_on_security_high if default_policy else True)
                 block_reg = gate.get("block_regression", default_policy.block_on_regression if default_policy else False)
-                
+
                 policies[agent_name] = GatePolicy(
                     agent_name=agent_name,
                     min_combined_score=min_score,
@@ -391,7 +391,7 @@ class ProjectOS:
             notifier=self.notifier,
             state_dir=self.state_dir,
         )
-        
+
         projects_section = self.config.get("projects", {})
         active_projects = projects_section.get("active", [])
         for proj in active_projects:
@@ -400,7 +400,7 @@ class ProjectOS:
                 project_root=Path(proj["path"]).expanduser(),
                 priority=proj.get("priority", 1),
             )
-            
+
         project_roots = [
             Path(proj["path"]).expanduser()
             for proj in active_projects
@@ -514,7 +514,12 @@ class ProjectOS:
         self.alert_manager.stop()
         if self._event_thread is not None:
             self._event_thread.join(timeout=EVENT_THREAD_JOIN_SECONDS)
-        self.task_queue.shutdown(wait=True)
+
+        wait_shutdown = True
+        import os
+        if os.environ.get("PROJECTOS_INTAKE_SMOKE") == "1":
+            wait_shutdown = False
+        self.task_queue.shutdown(wait=wait_shutdown)
         self.persistence_manager.snapshot_status(
             self._agent_statuses(),
             self.provider_health_monitor.get_status(),
@@ -532,17 +537,17 @@ class ProjectOS:
             self.commander.stop()
         self.trigger_system.stop()
         self.provider_health_monitor.stop()
-        
+
         def shutdown_queue():
             self.task_queue.shutdown(wait=True)
         t = threading.Thread(target=shutdown_queue)
         t.start()
         t.join(timeout=10.0)
-        
+
         self.alert_manager.stop()
         sys.stdout.flush()
         sys.stderr.flush()
-        
+
         self.persistence_manager.snapshot_status(
             self._agent_statuses(),
             self.provider_health_monitor.get_status(),
@@ -563,11 +568,11 @@ class ProjectOS:
             except queue.Empty:
                 self._check_project_rotation()
                 continue
-            
+
             prev_phase = self.phase_manager.get_current_phase(self.project_name)
             self.clone_agent.handle(event)
             curr_phase = self.phase_manager.get_current_phase(self.project_name)
-            
+
             if prev_phase is not None and (curr_phase is None or curr_phase.phase_id != prev_phase.phase_id):
                 self.project_scheduler.record_work_done(self.project_name)
                 self._check_project_rotation()
@@ -579,7 +584,7 @@ class ProjectOS:
             prev_phase = self.phase_manager.get_current_phase(self.project_name)
             self.clone_agent.handle(next_event)
             curr_phase = self.phase_manager.get_current_phase(self.project_name)
-            
+
             if prev_phase is not None and (curr_phase is None or curr_phase.phase_id != prev_phase.phase_id):
                 self.project_scheduler.record_work_done(self.project_name)
                 self._check_project_rotation()
@@ -1023,9 +1028,9 @@ class ProjectOS:
         """Switch current ProjectOS context to the named project."""
         if next_project_name == self.project_name:
             return
-        
+
         self.logger.info("Switching context from %s to %s", self.project_name, next_project_name)
-        
+
         registry = ProjectRegistry()
         config = registry.get_project(next_project_name)
         if not config:
@@ -1045,7 +1050,7 @@ class ProjectOS:
 
         self.trace_store = TraceStore(self.state_dir)
         self.tracer.trace_store = self.trace_store
-        
+
         self.token_budget = TokenBudget(self.state_dir)
         self.cost_tracker = CostTracker(
             self.state_dir,
@@ -1096,7 +1101,7 @@ class ProjectOS:
         self.safety_policy = DefaultSafetyPolicy(self.project_root)
         self.persistence_manager = PersistenceManager(self.state_dir)
         self.context_loader = ProjectContextLoader(self.project_root)
-        
+
         self.clone_agent = self._initialize_agents()
 
         self.trigger_system = TriggerSystem(
@@ -1106,13 +1111,13 @@ class ProjectOS:
             ignore_patterns=self.ignore_patterns,
             code_indexer=self.code_indexer,
         )
-        
+
         self._build_code_index()
         self._log_memory_stats()
         self._restore_persisted_queue_state()
-        
+
         self.trigger_system.start()
-        
+
         if self.commander is not None:
             from core.notifications.command_registry import CommandRegistry
             self.command_registry = CommandRegistry(

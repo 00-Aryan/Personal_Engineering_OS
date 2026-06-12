@@ -107,15 +107,55 @@ class ChromaVectorStore(BaseVectorStore):
         self.chroma_path.mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(path=str(self.chroma_path))
         self.collection = self.client.get_or_create_collection(name=collection_name)
+        try:
+            # Proactive dimension mismatch check by running a test query
+            dim = self.embedder.get_dimension()
+            self.collection.query(
+                query_embeddings=[[0.0] * dim],
+                n_results=1
+            )
+        except Exception as exc:
+            exc_str = str(exc)
+            if "dimension" in exc_str or "Collection expecting" in exc_str:
+                logger.warning(
+                    "Embedding dimension mismatch in collection %s: Recreating.",
+                    collection_name
+                )
+                try:
+                    self.client.delete_collection(name=collection_name)
+                    self.collection = self.client.create_collection(name=collection_name)
+                except Exception as del_exc:
+                    logger.error("Failed to delete/recreate collection %s: %s", collection_name, del_exc)
+            else:
+                logger.warning("Failed to validate collection %s dimension: %s", collection_name, exc)
 
     def add(self, record: VectorRecord) -> None:
         """Store a record in ChromaDB."""
-        self.collection.add(
-            ids=[record.id],
-            embeddings=[record.embedding],
-            documents=[record.text],
-            metadatas=[self._metadata(record)],
-        )
+        try:
+            self.collection.add(
+                ids=[record.id],
+                embeddings=[record.embedding],
+                documents=[record.text],
+                metadatas=[self._metadata(record)],
+            )
+        except Exception as exc:
+            exc_str = str(exc)
+            if "dimension" in exc_str or "Collection expecting" in exc_str:
+                logger.warning("Dimension mismatch during add. Recreating collection %s...", self.collection_name)
+                try:
+                    self.client.delete_collection(name=self.collection_name)
+                    self.collection = self.client.create_collection(name=self.collection_name)
+                    self.collection.add(
+                        ids=[record.id],
+                        embeddings=[record.embedding],
+                        documents=[record.text],
+                        metadatas=[self._metadata(record)],
+                    )
+                except Exception as del_exc:
+                    logger.error("Failed to recreate and retry add for %s: %s", self.collection_name, del_exc)
+                    raise exc
+            else:
+                raise exc
 
     def search(
         self,
@@ -135,7 +175,16 @@ class ChromaVectorStore(BaseVectorStore):
             )
             return self._search_results(response)
         except Exception as exc:
-            logger.warning("Chroma vector search failed: %s", exc)
+            exc_str = str(exc)
+            if "dimension" in exc_str or "Collection expecting" in exc_str:
+                logger.warning("Dimension mismatch during search. Recreating collection %s...", self.collection_name)
+                try:
+                    self.client.delete_collection(name=self.collection_name)
+                    self.collection = self.client.create_collection(name=self.collection_name)
+                except Exception as del_exc:
+                    logger.error("Failed to delete/recreate collection %s: %s", self.collection_name, del_exc)
+            else:
+                logger.warning("Chroma vector search failed: %s", exc)
             return []
 
     def delete(self, record_id: str) -> bool:

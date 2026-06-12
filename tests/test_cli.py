@@ -599,7 +599,7 @@ class CliTestCase(unittest.TestCase):
 
         state_dir = self.project_root / ".projectos_state"
         state_dir.mkdir(parents=True, exist_ok=True)
-        
+
         gemini_state = {
             "state": "open",
             "failure_count": 5,
@@ -638,7 +638,7 @@ class CliTestCase(unittest.TestCase):
         self.assertIn("○ OPEN", result_with_files.output)
         self.assertIn("5", result_with_files.output)
         self.assertIn("0s ago", result_with_files.output)
-        
+
         self.assertIn("ollama", result_with_files.output)
         self.assertIn("◑ HALF_OPEN", result_with_files.output)
 
@@ -646,7 +646,7 @@ class CliTestCase(unittest.TestCase):
         """Verify reliability reset command forces the circuit breaker to CLOSED."""
         state_dir = self.project_root / ".projectos_state"
         state_dir.mkdir(parents=True, exist_ok=True)
-        
+
         gemini_state = {
             "state": "open",
             "failure_count": 5,
@@ -668,7 +668,7 @@ class CliTestCase(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Circuit breaker for gemini has been reset to CLOSED.", result.output)
-        
+
         updated_state = json.loads(
             (state_dir / "circuit_state_gemini.json").read_text(encoding=TEST_ENCODING)
         )
@@ -731,7 +731,7 @@ class CliTestCase(unittest.TestCase):
         with patch.object(Path, "cwd", return_value=self.project_root):
             desc_file = self.project_root / "project_description.md"
             desc_file.write_text("## Description\nMissing title header\n", encoding="utf-8")
-            
+
             result = self.runner.invoke(
                 cli,
                 ["context", "show"],
@@ -748,7 +748,7 @@ class CliTestCase(unittest.TestCase):
                 "# Test Project\n\n## Description\nSome description\n\n## Tech Stack\n- Python\n",
                 encoding="utf-8"
             )
-            
+
             result = self.runner.invoke(
                 cli,
                 ["context", "show"],
@@ -764,7 +764,7 @@ class CliTestCase(unittest.TestCase):
             desc_file = self.project_root / "project_description.md"
             if desc_file.exists():
                 desc_file.unlink()
-                
+
             result = self.runner.invoke(
                 cli,
                 ["context", "init"],
@@ -780,7 +780,7 @@ class CliTestCase(unittest.TestCase):
         with patch.object(Path, "cwd", return_value=self.project_root):
             desc_file = self.project_root / "project_description.md"
             desc_file.write_text("existing content", encoding="utf-8")
-            
+
             result = self.runner.invoke(
                 cli,
                 ["context", "init"],
@@ -789,6 +789,179 @@ class CliTestCase(unittest.TestCase):
             self.assertEqual(result.exit_code, 0)
             self.assertIn("project_description.md already exists.", result.output)
             self.assertEqual(desc_file.read_text(encoding="utf-8"), "existing content")
+
+    @patch("cli.main.ProjectOS")
+    def test_intake_smoke_missing_description(self, mock_project_os) -> None:
+        """Verify intake-smoke fails if project_description.md is missing."""
+        result = self.runner.invoke(
+            cli,
+            ["intake-smoke", "--project-root", str(self.project_root)],
+            obj={"project_root": self.project_root},
+        )
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("INTAKE SMOKE FAILED", result.output)
+        self.assertIn("project_description.md is missing", result.output)
+
+    @patch("cli.main.ProjectOS")
+    def test_intake_smoke_redacts_secrets_in_errors(self, mock_project_os) -> None:
+        """Verify intake-smoke redacts secrets in error logs/messages."""
+        desc_file = self.project_root / "project_description.md"
+        desc_file.write_text("# Test Project\n\n## Description\nSome description\n\n## Tech Stack\n- Python\n", encoding="utf-8")
+
+        with patch("core.project_context.ProjectContextLoader.load") as mock_load:
+            mock_load.side_effect = Exception("failed for key=AIzaSySecretKey and Bearer sk-or-v1-some_secret and bot123456:bot_secret_token")
+
+            result = self.runner.invoke(
+                cli,
+                ["intake-smoke", "--project-root", str(self.project_root)],
+                obj={"project_root": self.project_root},
+            )
+
+            self.assertEqual(result.exit_code, 1)
+            self.assertIn("INTAKE SMOKE FAILED", result.output)
+            self.assertIn("key=<redacted>", result.output)
+            self.assertNotIn("AIzaSySecretKey", result.output)
+            self.assertIn("Bearer <redacted>", result.output)
+            self.assertNotIn("some_secret", result.output)
+            self.assertIn("<redacted-bot-token>", result.output)
+            self.assertNotIn("bot_secret_token", result.output)
+
+    @patch("cli.main.ProjectOS")
+    @patch("cli.main._validate_artifacts")
+    def test_intake_smoke_success(self, mock_validate, mock_project_os_cls) -> None:
+        """Verify intake-smoke succeeds when all validations pass."""
+        desc_file = self.project_root / "project_description.md"
+        desc_file.write_text("# Test Project\n\n## Description\nSome description\n\n## Tech Stack\n- Python\n", encoding="utf-8")
+
+        mock_project_os = mock_project_os_cls.return_value
+        mock_project_os.task_queue.get_pending_count.return_value = 0
+
+        state_dir = self.project_root / ".projectos_state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        mock_project_os.state_dir = state_dir
+
+        mock_validate.return_value = (True, "")
+
+        mock_project_os.phase_manager._load_state.return_value = []
+
+        config_dir = self.project_root / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "projectos.yaml"
+        config_file.write_text("agents:\n  clone: gemini\n", encoding="utf-8")
+
+        result = self.runner.invoke(
+            cli,
+            ["intake-smoke", "--project-root", str(self.project_root), "--timeout-seconds", "5"],
+            obj={"project_root": self.project_root},
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("INTAKE SMOKE OK", result.output)
+        self.assertIn("Required artifacts valid: yes", result.output)
+
+    @patch("cli.main.ProjectOS")
+    @patch("cli.main._validate_artifacts")
+    def test_intake_smoke_validation_failure(self, mock_validate, mock_project_os_cls) -> None:
+        """Verify intake-smoke fails when validation fails."""
+        desc_file = self.project_root / "project_description.md"
+        desc_file.write_text("# Test Project\n\n## Description\nSome description\n\n## Tech Stack\n- Python\n", encoding="utf-8")
+
+        mock_project_os = mock_project_os_cls.return_value
+        mock_project_os.task_queue.get_pending_count.return_value = 0
+
+        state_dir = self.project_root / ".projectos_state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        mock_project_os.state_dir = state_dir
+
+        mock_validate.return_value = (False, "Phased plan parsing failed: invalid character")
+
+        config_dir = self.project_root / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "projectos.yaml"
+        config_file.write_text("agents:\n  clone: gemini\n", encoding="utf-8")
+
+        result = self.runner.invoke(
+            cli,
+            ["intake-smoke", "--project-root", str(self.project_root), "--timeout-seconds", "5"],
+            obj={"project_root": self.project_root},
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("INTAKE SMOKE FAILED", result.output)
+        self.assertIn("Phased plan parsing failed: invalid character", result.output)
+
+    @patch("cli.main.ProjectOS")
+    @patch("cli.main._validate_artifacts")
+    def test_intake_smoke_rate_limit_failure(self, mock_validate, mock_project_os_cls) -> None:
+        """Verify intake-smoke handles and classifies rate limits correctly."""
+        desc_file = self.project_root / "project_description.md"
+        desc_file.write_text("# Test Project\n\n## Description\nSome description\n\n## Tech Stack\n- Python\n", encoding="utf-8")
+
+        mock_project_os = mock_project_os_cls.return_value
+        mock_project_os.task_queue.get_pending_count.return_value = 0
+
+        state_dir = self.project_root / ".projectos_state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        mock_project_os.state_dir = state_dir
+
+        mock_validate.side_effect = lambda resolved_root, project_os, log_collector: (
+            False,
+            "Provider rate limited: gemini returned 429 RESOURCE_EXHAUSTED"
+        )
+
+        config_dir = self.project_root / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "projectos.yaml"
+        config_file.write_text("agents:\n  clone: gemini\n", encoding="utf-8")
+
+        result = self.runner.invoke(
+            cli,
+            ["intake-smoke", "--project-root", str(self.project_root), "--timeout-seconds", "5"],
+            obj={"project_root": self.project_root},
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("INTAKE SMOKE FAILED", result.output)
+        self.assertIn("Reason: Provider rate limited: gemini returned 429 RESOURCE_EXHAUSTED", result.output)
+
+    def test_with_retry_smoke_mode_aborts_immediately_on_429(self) -> None:
+        """Verify that with_retry aborts immediately on 429 when in smoke mode."""
+        from core.retry import with_retry
+        import os
+        import time
+
+        calls = 0
+        class DummyRateLimitError(Exception):
+            status_code = 429
+
+        def fn() -> str:
+            nonlocal calls
+            calls += 1
+            raise DummyRateLimitError("rate limit")
+
+        with patch.dict(os.environ, {"PROJECTOS_INTAKE_SMOKE": "1", "PROJECTOS_INTAKE_SMOKE_TIMEOUT": str(time.time() + 10)}):
+            with self.assertRaises(RuntimeError) as ctx:
+                with_retry(fn, max_attempts=5)
+            self.assertIn("Provider rate limited: gemini returned 429 RESOURCE_EXHAUSTED", str(ctx.exception))
+            self.assertEqual(calls, 1)
+
+    def test_with_retry_smoke_mode_times_out(self) -> None:
+        """Verify that with_retry times out rather than sleeping when timeout is exceeded."""
+        from core.retry import with_retry
+        import os
+        import time
+
+        calls = 0
+        def fn() -> str:
+            nonlocal calls
+            calls += 1
+            raise ValueError("transient error")
+
+        with patch.dict(os.environ, {"PROJECTOS_INTAKE_SMOKE": "1", "PROJECTOS_INTAKE_SMOKE_TIMEOUT": str(time.time() - 1)}):
+            with self.assertRaises(TimeoutError) as ctx:
+                with_retry(fn, max_attempts=5, backoff_seconds=1.0)
+            self.assertIn("Intake smoke test timed out", str(ctx.exception))
+            self.assertEqual(calls, 1)
 
 
 if __name__ == "__main__":

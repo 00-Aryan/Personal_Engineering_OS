@@ -18,12 +18,12 @@ providers:
   
   gemini-2.5-flash:
     type: gemini
-    model: gemini-1.5-flash
+    model: gemini-2.5-flash
     api_key_env: GEMINI_API_KEY
     
   deepseek-v3:
     type: openrouter
-    model: qwen/qwen3-coder-480b-a35b:free
+    model: google/gemma-4-31b-it:free
     api_key_env: OPENROUTER_API_KEY
     
   ollama-local:
@@ -35,6 +35,7 @@ providers:
 # --- Agent Model Assignments ---
 agents:
   clone:        gemini-2.5-flash
+  project_intake: deepseek-v3
   planning:     deepseek-v3
   code_writing: gemini-2.5-flash
   code_review:  gemini-2.5-flash
@@ -132,8 +133,8 @@ model_parameters:
     max_tokens: 600
     top_p: 0.9
   project_intake:
-    temperature: 0.4
-    max_tokens: 2000
+    temperature: 0.3
+    max_tokens: 6000
     top_p: 0.9
 
 ollama:

@@ -9,18 +9,33 @@
 - decisions.log is append-only, never overwritten
 
 ## Before Writing Any Code
-1. Read all files in core/ first
-2. Read the relevant TASK_XX.md completely
-3. Read existing tests to understand patterns
-4. Check CONTRADICTIONS.md for resolved decisions
+1. Inspect ONLY the target task file, `AGENTS.md`, and directly relevant implementation files. Do NOT perform broad repository scans unless the task explicitly requires it.
+2. Read the relevant TASK_XX.md completely.
+3. Read existing tests to understand patterns.
+4. Check CONTRADICTIONS.md for resolved decisions.
+5. **No Full Test Suite Before Edits**: Do NOT run the full test suite before editing unless explicitly required. Only run targeted reproduction/failing commands if needed.
 
 ## Task Execution Protocol
-- Read tasks/README.md to find next PENDING task
-- Execute exactly as specified, no scope creep
-- Write TASK_XX_RESULT.md when done
-- Update tasks/README.md status
+- Read tasks/README.md to find next PENDING task.
+- Execute exactly as specified, no scope creep.
+- **Strict File Scope**: If a task declares a specific file scope and additional files must be modified, stop immediately and write to `tasks/TASK_XX_RESULT.md`:
+  `TASK BLOCKED: required changes exceed declared scope.`
+  Do NOT silently modify extra files.
+- **Early Checkpoints**: Create or update `tasks/TASK_XX_RESULT.md` (with status `IN_PROGRESS`) BEFORE running any command expected to run longer than 30 seconds.
+- **Mandatory Checkpoint After Implementation**: After code edits are completed and before long validation, update the result file to include:
+  ```
+  Implementation completed.
+  Files changed:
+  - <file>
+  Validation pending.
+  ```
+- **Explicit Timeout Wrappers**: Any command running longer than 30 seconds must be wrapped in `timeout <seconds>` (e.g. `timeout 120s`). No unbounded validation commands.
+- **Stop After First Blocker**: If a command reveals a major blocker, document it and stop. Do NOT turn one task into a larger multi-system fix.
+- **Avoid Background Commands**: Avoid background runs unless necessary. If used, collect output, terminate if stale, and record the outcome in the result file.
+- Write final `tasks/TASK_XX_RESULT.md` when done.
+- Update tasks/README.md status.
 - Run full test suite before marking DONE:
-  UV_CACHE_DIR=/tmp/uv-cache PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest
+  timeout 120s UV_CACHE_DIR=/tmp/uv-cache PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q --timeout=30
 
 ## Code Standards
 - Every function: docstring + type hints

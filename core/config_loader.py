@@ -43,7 +43,7 @@ def adapt_to_legacy_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
             "api_key_env": "GEMINI_API_KEY",
             "completion_url_template": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
             "stream_url_template": "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?key={api_key}",
-            "default_model": "gemini-1.5-flash"
+            "default_model": "gemini-2.5-flash"
         },
         "openrouter": {
             "api_key_env": "OPENROUTER_API_KEY",
@@ -230,7 +230,7 @@ providers:
   
   gemini-flash:
     type: gemini
-    model: gemini-1.5-flash
+    model: gemini-2.5-flash
     api_key_env: GEMINI_API_KEY
     
   deepseek-v3:

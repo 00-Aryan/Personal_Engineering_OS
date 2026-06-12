@@ -84,7 +84,10 @@ def with_retry(
                 logger.error("Authentication error (401) encountered. Raising immediately.")
                 raise error
 
+            import os
             if status_code == 429:
+                if os.environ.get("PROJECTOS_INTAKE_SMOKE") == "1":
+                    raise RuntimeError("Provider rate limited: gemini returned 429 RESOURCE_EXHAUSTED")
                 retry_after = _get_retry_after(error)
                 wait_time = retry_after if retry_after is not None else 60.0
                 logger.warning(
@@ -98,6 +101,12 @@ def with_retry(
                 break
 
             sleep_seconds = backoff_seconds * attempt
+            if os.environ.get("PROJECTOS_INTAKE_SMOKE") == "1":
+                sleep_seconds = min(sleep_seconds, 0.1)
+                timeout_at = float(os.environ.get("PROJECTOS_INTAKE_SMOKE_TIMEOUT", "0"))
+                if timeout_at > 0 and time.time() + sleep_seconds >= timeout_at:
+                    raise TimeoutError("Intake smoke test timed out.")
+
             logger.warning(
                 "Retry attempt %s/%s after error (status code %s): %s",
                 attempt,

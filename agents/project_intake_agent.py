@@ -18,6 +18,10 @@ from core.notifications.telegram_notifier import TelegramNotifier
 from core.project_context import ProjectContextLoader
 
 
+class PlanGenerationError(RuntimeError):
+    """Raised when phased project planning cannot produce a valid plan."""
+
+
 class ProjectIntakeAgent(BaseAgent):
     """Handles new project onboarding.
 
@@ -185,7 +189,16 @@ class ProjectIntakeAgent(BaseAgent):
             answers = {}
 
         # 4. Generate plan
-        plan = self._generate_phased_plan(content, answers)
+        try:
+            plan = self._generate_phased_plan(content, answers)
+        except PlanGenerationError as e:
+            return AgentResult(
+                success=False,
+                output={
+                    "error": str(e),
+                    "project_name": detected_name,
+                },
+            )
 
         # 5. Send plan for approval
         approval_id = str(uuid.uuid4())[:8]
@@ -329,25 +342,8 @@ class ProjectIntakeAgent(BaseAgent):
                         phase["tasks"] = phase["tasks"][:7]
             return plan
         except Exception as e:
-            self.logger.error(f"Failed to parse phased plan: {e}")
-            return {
-                "project_name": "New Project",
-                "phases": [
-                    {
-                        "phase_id": "phase_1",
-                        "phase_number": 1,
-                        "name": "Phase 1: Foundation",
-                        "goal": "Establish core functionality",
-                        "tasks": [
-                            {
-                                "title": "Setup basic structure",
-                                "type": "feature",
-                                "priority": "HIGH",
-                                "complexity": "S",
-                                "acceptance_criteria": ["Initial files exist"],
-                            }
-                        ],
-                        "success_criteria": ["Basic structure compiles"],
-                    }
-                ],
-            }
+            raw_output = cleaned_output if "cleaned_output" in locals() else "None"
+            self.logger.error(f"Failed to parse phased plan: {e}. Raw output: {raw_output}")
+            raise PlanGenerationError(
+                "Failed to generate phased project plan; refusing to create approval-ready fallback plan."
+            ) from e

@@ -3,7 +3,7 @@ providers:
     api_key_env: OPENROUTER_API_KEY
     completion_url: https://openrouter.ai/api/v1/chat/completions
     stream_url: https://openrouter.ai/api/v1/chat/completions
-    default_model: openrouter-free
+    default_model: google/gemma-4-31b-it:free
   gemini:
     api_key_env: GEMINI_API_KEY
     completion_url_template: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}
@@ -19,47 +19,47 @@ agents:
     model: gemini-2.5-flash
   planning:
     provider: openrouter
-    model: deepseek-v3
+    model: google/gemma-4-31b-it:free
   code_writing:
     provider: openrouter
-    model: openrouter-free
+    model: google/gemma-4-31b-it:free
   code_review:
     provider: openrouter
-    model: openrouter-free
+    model: google/gemma-4-31b-it:free
     token_budget:
       hard_limit_per_call: 8000
   architecture:
     provider: openrouter
-    model: deepseek-v3
+    model: google/gemma-4-31b-it:free
   test:
     provider: openrouter
-    model: openrouter-free
+    model: google/gemma-4-31b-it:free
   docs:
     provider: gemini
     model: gemini-2.5-flash
 fallback_chain:
   planning:
-  - deepseek-v3
+  - google/gemma-4-31b-it:free
   - ollama-deepseek-r1
   - ollama-llama3
   code_writing:
-  - openrouter-free
+  - google/gemma-4-31b-it:free
   - ollama-codellama
   - ollama-llama3
   code_review:
-  - openrouter-free
+  - google/gemma-4-31b-it:free
   - ollama-codellama
   clone:
   - gemini-2.5-flash
   - ollama-llama3
   test:
-  - openrouter-free
+  - google/gemma-4-31b-it:free
   - ollama-codellama
   docs:
   - gemini-2.5-flash
   - ollama-llama3
   architecture:
-  - deepseek-v3
+  - google/gemma-4-31b-it:free
   - ollama-deepseek-r1
 
 pricing:

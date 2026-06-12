@@ -91,8 +91,8 @@ class ProviderRateLimits:
             provider_name="gemini",
         ),
         "openrouter": RateLimiter(
-            capacity=200,
-            tokens_per_second=3.3,
+            capacity=8000,
+            tokens_per_second=250.0,
             provider_name="openrouter",
         ),
         "ollama": RateLimiter(

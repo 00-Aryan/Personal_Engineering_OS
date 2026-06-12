@@ -63,7 +63,7 @@ CONFIG_KEY_PROVIDER = "provider"
 CONFIG_KEY_PROVIDERS = "providers"
 CONFIG_KEY_STREAM_URL = "stream_url"
 CONFIG_KEY_STREAM_URL_TEMPLATE = "stream_url_template"
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "models.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "projectos.yaml"
 HEALTH_CHECK_TIMEOUT_SECONDS = 5
 PROVIDER_RETRY_ATTEMPTS = 3
 PROVIDER_RETRY_BACKOFF_SECONDS = 1.0
@@ -151,6 +151,7 @@ class ModelProvider(ABC):
                 logging.getLogger("projectos.model_provider").warning(
                     "config/models.yaml is deprecated. Please use config/projectos.yaml instead."
                 )
+                config_path = sibling_projectos
         with config_path.open("r", encoding="utf-8") as config_file:
             config = yaml.safe_load(config_file)
         if not isinstance(config, Mapping):

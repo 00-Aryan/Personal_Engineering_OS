@@ -85,6 +85,17 @@ Never start a task without reading all existing code first.
 - TASK_60: DONE (Multi-Project Rotation + Daily UX - 474 tests green)
 - TASK_61: DONE (Ollama Local Fallback + Model Parameter Tuning - 479 tests green)
 - TASK_62: DONE (README Overhaul + KNOWN_LIMITATIONS.md + FUTURE_SCOPE.md - 485 tests green)
+- TASK_63: DONE (Fix live_smoke provider failure semantics)
+- TASK_64: DONE (Add safe bounded external intake smoke command - 485 tests green)
+- TASK_65: DONE (Make intake-smoke fail honestly and redact provider secrets)
+- TASK_66: BLOCKED (Fix Gemini model configuration and embedding compatibility)
+- TASK_67: DONE (Harden AGY run-next-task workflow against timeout and over-execution)
+- TASK_68: DONE (Restore green CLI tests after rejected TASK-066 partial config migration - 489 tests green)
+- TASK_69: DONE (Diagnose missing phase-state artifact after intake-smoke - 489 tests green)
+- TASK_70: DONE (Add safe AGY task runner with timeout and resumable handoff - 489 tests green)
+- TASK_71: DONE (Reconcile dirty worktree after TASK-69 and TASK-70 - 489 tests green)
+
+
 
 
 ## Audit Protocol

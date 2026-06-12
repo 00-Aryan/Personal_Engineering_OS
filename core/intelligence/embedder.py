@@ -20,7 +20,7 @@ ENCODING = "utf-8"
 STATE_DIR_NAME = ".projectos_state"
 TFIDF_VOCAB_FILE_NAME = "tfidf_vocab.json"
 GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
-GEMINI_EMBEDDING_MODEL = "text-embedding-004"
+GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
 GEMINI_EMBEDDING_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_EMBEDDING_MODEL}:embedContent"

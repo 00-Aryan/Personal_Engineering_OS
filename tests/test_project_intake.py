@@ -102,6 +102,35 @@ class ProjectIntakeTestCase(unittest.TestCase):
         self.assertEqual(result.output["plan"]["project_name"], "TestProj")
         self.assertTrue((self.project_root / ".projectos" / "TestProj" / "plan.md").exists())
 
+    def test_intake_fails_without_saving_fallback_plan(self) -> None:
+        """Verify invalid plan generation fails closed and does not save fallback artifacts."""
+        description_file = self.project_root / "project_description.md"
+        description_file.write_text("Project Name: BrokenProj\nBuild a real system.", encoding="utf-8")
+
+        self.model_provider.complete.side_effect = [
+            json.dumps({
+                "project_name": "BrokenProj",
+                "description": "real system",
+                "tech_stack": "python",
+                "goals": ["build it"],
+            }),
+            "not valid json",
+        ]
+
+        event = AgentEvent(
+            event_type=EventType.NEW_PROJECT,
+            source_agent="unit_test",
+            payload={"context_file_path": str(description_file), "timeout_hours": 0.0001},
+        )
+
+        result = self.agent.handle(event)
+
+        self.assertFalse(result.success)
+        self.assertIn("Failed to generate phased project plan", result.output["error"])
+        self.assertFalse((self.project_root / ".projectos" / "BrokenProj" / "plan.md").exists())
+        self.assertFalse((self.project_root / ".projectos" / "BrokenProj" / "phases.yaml").exists())
+        self.task_queue.submit.assert_not_called()
+
     def test_intake_sends_questions_via_telegram(self) -> None:
         """Verify the intake agent sends clarifying questions via notifier."""
         description_file = self.project_root / "project_description.md"

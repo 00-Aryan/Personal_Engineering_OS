@@ -15,7 +15,7 @@ import yaml
 
 
 ENCODING = "utf-8"
-CONFIG_PATH = Path("config/models.yaml")
+CONFIG_PATH = Path("config/projectos.yaml")
 ENV_PATH = Path(".env")
 STATE_DIR = Path(".projectos_state")
 PROVIDER_STATUS_PATH = STATE_DIR / "provider_status.json"
